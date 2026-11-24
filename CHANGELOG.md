@@ -1,0 +1,33 @@
+# Changelog
+
+## v2.0.0-fork.1
+
+Fork of the `whippet2-julia19-dev` branch of [`timbitz/Whippet.jl`](https://github.com/timbitz/Whippet.jl) (`whippet2` branch). Changes in this release were developed using Gemini 4 Neon.
+
+### Performance Improvements (`whippet-quant`)
+* **Concrete in-memory index wrappers (`src/index.jl`, `src/Whippet.jl`, `bin/whippet-quant.jl`):** Added zero-copy `FastGraphLib{K, F}` and `FastSpliceGraph{K}` wrappers with concrete `LongSequence{DNAAlphabet{4}}`, `Edges{K}`, and `FMIndex` fields to eliminate dynamic dispatch in alignment and quantification while maintaining **100% compatibility with existing Julia 1.9 `.jls` index files**.
+* **Zero-allocation alignment hot path (`src/record.jl`, `src/fmindex_patch.jl`, `src/sgkmer.jl`, `src/edges.jl`, `src/align.jl`, `src/paired.jl`):**
+  * Concretely typed `FASTQRecord.sequence` (`LongSequence{DNAAlphabet{2}}`) with in-place `sequence`/`quality` buffer reuse in `fill!`.
+  * Zero-allocation subrange FM-index search (`sa_range_sub` / `sa_range_sub_rc`) and k-mer indexing (`kmer_index_sub`).
+  * Immutable `isbits` `SGAlignScore`, scalar register accumulation during extension, shallow alignment copying instead of `deepcopy`, 256-entry `phred_to_prob` lookup table, direct 2-bit vs 4-bit base comparisons, and $O(\log N)$ binary-search edge lookup (`intersect_sorted_gene_range`).
+  * Early exit on empty mate seeds and zero-allocation fast path for uniquely seeded read pairs.
+* **Multithreaded paired-end & single-end alignment (`src/reads.jl`):** Added `Threads.@spawn` chunked alignment with concurrent double-buffered `R1`/`R2` gzip reading and deterministic count accumulation (use `julia -t auto` or `julia -t N`), and removed manual `GC.gc()` pauses every 100k reads.
+* **Bias correction (`src/bias.jl`):** Zero-allocation rolling 2-bit hexamer primer counting and sliding-window GC content counting.
+* **Quantification, EM, events & I/O (`src/quant.jl`, `src/events.jl`, `src/io.jl`, `src/graph.jl`):**
+  * Skip zero-count nodes/edges in `build_equivalence_classes!` and avoid repeated `collect(iset)` allocations.
+  * Track active isoforms and compact converged equivalence classes in `gene_em!`.
+  * Canonical fast path in `_process_events`, hoisted `maximum(edges)`, type-stable `_process_spliced`, `Set`-backed deduplication in `reduce_graph`, iterative `rec_tandem_em!`, and interval-indexed `edges_write`.
+  * Zero-allocation `write_int` / `write_float` (via `Base.Ryu.writeshortest`) for `.tpm.gz`, `.jnc.gz`, and `.psi.gz` output.
+  * Removed obsolete `Base.get(::Tuple, ...)` overwrite in `src/graph.jl` to restore clean Julia 1.9 precompilation.
+
+### Bug Fixes
+* **GC bias lookup (`src/bias.jl`):** Fixed `value!(mod::JointBiasMod, bin::Int)` indexing 5'-primer arrays (`mod.fore`/`mod.back`) instead of GC arrays (`mod.gcfore`/`mod.gcback`), and guarded zero denominators.
+* **Paired-end GC accumulation (`src/bias.jl`):** Fixed `count!(mod::JointBiasMod, fwd, rev)` overwriting mate 1's GC bins in `mod.temp.gc` with mate 2's, and dynamically grow `mod.temp.gc` for long reads.
+* **Short-read & zero-sum safety (`src/bias.jl`, `src/quant.jl`):** Clamped `primer_count!` loops to read length (preventing `BoundsError` on mapped reads < 37 nt with `--biascorrect`), guarded zero sums in `primer_normalize!`/`gc_normalize!`, and fixed `add_to_back!` return value.
+* **SRA FASTQ `'N'` encoding (`src/record.jl`):** Sanitize ambiguous bases in-place via a 256-byte lookup table in `Base.fill!`, fixing `Cannot encode 78 to BioSequences.DNAAlphabet{2}()` on SRA FASTQ files with `+SRR...` line-3 headers ([upstream #135](https://github.com/timbitz/Whippet.jl/issues/135)).
+* **Tandem-start (`TS`) event indexing (`src/io.jl`, `src/events.jl`):** Fixed `output_utr` comparing `String` `"TS"` to `EdgeMotif` `TXST_MOTIF` (which shifted internal `TS` events with `node > 1` down by 1 node), and updated `next_istandem` to check `== TXEN_MOTIF`.
+* **Other fixes:** Guarded zero-total division (`NaN` injection) in `assign_ambig!` (`src/quant.jl`), fixed hardcoded `prop_temp = zeros(500)` limit in `gene_em!` (`src/quant.jl`), fixed supplementary mate-2 `fwd_mate` flag in paired-end `write_sam` (`src/io.jl`), fixed `sgkmer(s)` -> `sgkmer(sub)` in `add_kmer_edge!` (`src/edges.jl`), and fixed duplicate `one` check in `EdgeType` assertion (`src/graph.jl`).
+
+### Compatibility Note
+* **Indexes:** Existing Julia 1.9 `.jls` index files work without rebuilding.
+* **Differential splicing (`whippet-delta.jl`):** Because the `TS` node-index and `--biascorrect` fixes change output rows/values, all `.psi.gz` files compared together in `whippet-delta.jl` should be quantified with the same version.

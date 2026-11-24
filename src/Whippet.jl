@@ -53,6 +53,7 @@ include("motif.jl")
 export SpliceGraph,
        SpliceGraphQuant,
        GraphLib,
+       FastGraphLib,
        GraphLibQuant,
        GeneInfo,
        TxInfo,

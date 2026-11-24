@@ -29,6 +29,43 @@ end
 
 Base.intersect( arrA::Vector{SGNode}, arrB::Vector{SGNode} ) = intersect_sorted( arrA, arrB )
 
+# Binary search for the index range of entries with node.gene == g in a gene-sorted Vector{SGNode}
+@inline function gene_node_range( arr::Vector{SGNode}, g::GeneInt )
+   len = length(arr)
+   # findfirst >= g
+   lo = 1
+   hi = len + 1
+   @inbounds while lo < hi
+      mid = (lo + hi) >>> 1
+      if arr[mid].gene < g
+         lo = mid + 1
+      else
+         hi = mid
+      end
+   end
+   first_idx = lo
+   if first_idx > len || (@inbounds arr[first_idx].gene != g)
+      return 1:0
+   end
+   # findlast == g (usually 1-2 elements, linear scan is faster than second binary search for small runs)
+   last_idx = first_idx
+   @inbounds while last_idx < len && arr[last_idx + 1].gene == g
+      last_idx += 1
+   end
+   return first_idx:last_idx
+end
+
+# Zero-allocation equivalent of filtering intersect_sorted(arrA, arrB) to rn.gene == g:
+# returns the subrange of arrB matching intersect_sorted(arrA, arrB) for gene g
+@inline function intersect_sorted_gene_range( arrA::Vector{SGNode}, arrB::Vector{SGNode}, g::GeneInt )
+   rB = gene_node_range(arrB, g)
+   isempty(rB) && return 1:0
+   rA = gene_node_range(arrA, g)
+   isempty(rA) && return 1:0
+   cnt = min(length(rA), length(rB))
+   return first(rB):(first(rB) + cnt - 1)
+end
+
 # Intersect two sorted arrays of SGNode by gene entry
 # Return the list of intersected arrB entries
 function intersect_sorted( arrA::Vector{T}, arrB::Vector{T} ) where T
@@ -72,7 +109,7 @@ function add_kmer_edge!( kmers::Vector{SGNodeSet},
          curl -= 1
       end
       try
-        curkmer = sgkmer( s )
+        curkmer = sgkmer( sub )
         ind = kmer_index(curkmer)
       catch
       end

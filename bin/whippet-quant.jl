@@ -128,6 +128,7 @@ function main()
    println(stderr, "Loading splice graph index... $indexname")
    @timer lib = open(deserialize, indexname)
    checkversion( lib, ver, minversion )
+   lib = FastGraphLib( lib )
 
    inputfile  = fixpath( args["filename.fastq[.gz]--OR--pre-aligned.bam"] )
    isbaminput = hasextension(inputfile, ".bam")
@@ -158,7 +159,10 @@ function main()
 
    enc_offset = args["phred-64"] ? 64 : 33
 
-   println(stderr, "Processing reads from file...")   
+   println(stderr, "Processing reads from file...")
+   if Threads.nthreads() > 1
+      println(stderr, "Using $(Threads.nthreads()) threads for read alignment...")
+   end
    if isbaminput
       parser = ispaired ? make_collated_parser( inputfile ) : make_single_parser( inputfile )
       println(stderr, "BAM: " * inputfile)

@@ -21,13 +21,53 @@ function tab_write( io::BufOut, vs::Vector{SubString{String}} )
    end_write( io, vs[length(vs)] )
 end
 
+const _FMT_BUF_POOL = [Vector{UInt8}(undef, 64) for _ in 1:64]
+
+@inline function _fmt_buf()
+   tid = Threads.threadid()
+   if tid <= length(_FMT_BUF_POOL)
+      return @inbounds _FMT_BUF_POOL[tid]
+   else
+      return Vector{UInt8}(undef, 64)
+   end
+end
+
+@inline function write_int( io::BufOut, n::Integer )
+   val = Int64(n)
+   if val < 0
+      write( io, UInt8('-') )
+      u = reinterpret(UInt64, -val)
+   else
+      u = UInt64(val)
+   end
+   if u < 10
+      write( io, UInt8('0') + UInt8(u) )
+      return
+   end
+   buf = _fmt_buf()
+   pos = 32
+   @inbounds while u > 0
+      q = div(u, UInt64(10))
+      r = u - q * UInt64(10)
+      buf[pos] = UInt8('0') + UInt8(r)
+      pos -= 1
+      u = q
+   end
+   GC.@preserve buf unsafe_write( io, pointer(buf, pos + 1), 32 - pos )
+end
+
+@inline function write_float( io::BufOut, x::Float64 )
+   buf = _fmt_buf()
+   pos = Base.Ryu.writeshortest( buf, 1, x )
+   GC.@preserve buf unsafe_write( io, pointer(buf), pos - 1 )
+end
+
 function coord_write( io::BufOut, chr, first, last; tab=false )
-   write( io, chr   )
-   write( io, ':'   )
-   write( io, string(first) )
-   write( io, '-'   )
-   write( io, string(last)  )
-   tab && write( io, '\t' )
+   write( io, chr, UInt8(':') )
+   write_int( io, first )
+   write( io, UInt8('-') )
+   write_int( io, last )
+   tab && write( io, UInt8('\t') )
 end
 
 function coord_string( chr, first, last; tab::Bool=false )
@@ -37,27 +77,37 @@ end
 
 function coord_write( io::BufOut, chr, first, last, strand; tab=false )
    coord_write( io, chr, first, last )
-   write( io, ':'    )
-   write( io, strand )
-   tab && write( io, '\t' )
+   write( io, UInt8(':'), strand )
+   tab && write( io, UInt8('\t') )
 end
 
 function complex_write( io::BufOut, complex::Int; tab=false )
    write( io, COMPLEX_CHAR )
-   write( io, string(complex) )
-   tab && write( io, '\t' )
+   write_int( io, complex )
+   tab && write( io, UInt8('\t') )
 end
 
 function conf_int_write( io::BufOut, conf_int::Tuple; tab=false, width=false, sig=4 )
    lo,hi = conf_int #unpack
    if width
-      write( io, string( round(hi-lo, digits=sig) ) )
-      write( io, '\t' )
+      write_float( io, Float64(round(hi-lo, digits=sig)) )
+      write( io, UInt8('\t') )
    end
-   write( io, string(lo) )
-   write( io, ',' )
-   write( io, string(hi) )
-   tab && write( io, '\t' )
+   write_float( io, Float64(lo) )
+   write( io, UInt8(',') )
+   write_float( io, Float64(hi) )
+   tab && write( io, UInt8('\t') )
+end
+
+@inline write_edge_node( io::BufOut, var::I ) where I <: Integer = write_int( io, var )
+function write_edge_node( io::BufOut, var::NodeFloat )
+   (root, node, pos) = decode_aberrant(var)
+   write_int( io, root )
+   root == node || write( io, UInt8('I') )
+   if pos > 0
+      write( io, UInt8('>') )
+      write_int( io, pos - 1 )
+   end
 end
 
 format_edge_string( var::I ) where I <: Integer = string(Int(var))
@@ -87,20 +137,21 @@ function format_node_string( var::NodeFloat )
 end
 
 function edges_write( io::BufOut, edges::IntervalMap{N,C}, range ) where {N <: NodeNum, C <: ReadCounter}
-   first = true
-   for i in edges
-      if i.first >= minimum(range) && i.last <= maximum(range)
-         !first && write( io, ',' )
-         write( io, format_edge_string(i.first) )
-         write( io, '-' )
-         write( io, format_edge_string(i.last) )
-         write( io, ':' )
-         write( io, string(round(get(i.value), digits=1)) )
-         first = false
+   isempty(range) && return
+   min_r = minimum(range)
+   max_r = maximum(range)
+   first_out = true
+   for i in intersect( edges, (N(min_r), N(max_r)) )
+      if i.first >= min_r && i.last <= max_r
+         !first_out && write( io, UInt8(',') )
+         write_edge_node( io, i.first )
+         write( io, UInt8('-') )
+         write_edge_node( io, i.last )
+         write( io, UInt8(':') )
+         write_float( io, Float64(round(get(i.value), digits=1)) )
+         first_out = false
       end
    end
-   #println(stderr, range)
-   #println(stderr, edges)
 end
 
 #=
@@ -123,7 +174,7 @@ function qual_write( io::BufOut, read::FASTQRecord; qualoffset=33, tab=false )
    tab && write( io, '\t' )
 end
 
-function sam_flag( align::SGAlignment, lib::GraphLib, ind, paired, first, is_pair_rc, is_supplemental )
+function sam_flag( align::SGAlignment, lib::SeqLibrary, ind, paired, first, is_pair_rc, is_supplemental )
    flag = UInt16(0)
    if paired
       flag |= 0x01
@@ -148,7 +199,7 @@ end
    pad > 0 ? string(pad) * "S" : ""
 end
 
-function cigar_string( align::SGAlignment, sg::SpliceGraph, strand::Bool, readlen=0 )
+function cigar_string( align::SGAlignment, sg::AnySpliceGraph, strand::Bool, readlen=0 )
    curpos    = align.offset                                 # left most position
    running   = 0                                            # cur number of running matches
    total     = align.offsetread - 1                         # total positions accounted for
@@ -191,7 +242,7 @@ end
 function write_sam( io::BufOut, 
                   read::FASTQRecord, 
                   align::SGAlignment, 
-                  lib::GraphLib;
+                  lib::SeqLibrary;
                      mapq::Int=0, 
                      paired::Bool=false, 
                      fwd_mate::Bool=true, 
@@ -267,7 +318,7 @@ end
 function write_sam( io::BufOut, 
                   read::FASTQRecord, 
                   alignvec::Vector{SGAlignment}, 
-                  lib::GraphLib;
+                  lib::SeqLibrary;
                      paired::Bool=false, 
                      fwd_mate::Bool=true, 
                      is_pair_rc::Bool=true, 
@@ -292,7 +343,7 @@ function write_sam( io::BufOut,
                   rev::FASTQRecord,
                   fwd_vec::Vector{SGAlignment}, 
                   rev_vec::Vector{SGAlignment}, 
-                  lib::GraphLib;
+                  lib::SeqLibrary;
                      paired::Bool=true, 
                      fwd_mate::Bool=true, 
                      is_pair_rc::Bool=true, 
@@ -308,28 +359,25 @@ function write_sam( io::BufOut,
       if i != best
          write_sam( io, fwd, fwd_vec[i], lib, mapq=mapq_val, paired=paired, fwd_mate=fwd_mate, is_pair_rc=is_pair_rc,
                                          qualoffset=qualoffset, supplemental=true )
-         write_sam( io, rev, rev_vec[i], lib, mapq=mapq_val, paired=paired, fwd_mate=fwd_mate, is_pair_rc=is_pair_rc,
+         write_sam( io, rev, rev_vec[i], lib, mapq=mapq_val, paired=paired, fwd_mate=!fwd_mate, is_pair_rc=is_pair_rc,
                                          qualoffset=qualoffset, supplemental=true )
       end
    end
 end
 
 
-function write_sam_header( io::BufOut, lib::GraphLib, head::Bool=true )
+function write_sam_header( io::BufOut, lib::SeqLibrary, head::Bool=true )
    refs = Dict{String,Int}()
    for gind in 1:length(lib.graphs)
       name = lib.info[gind].name
-      len  = max( lib.graphs[gind].nodecoord... )
+      len  = Int(maximum( lib.graphs[gind].nodecoord ))
       if !haskey( refs, name ) || refs[name] < len
          refs[name] = len + 10000
       end
    end
    head && write( io, "@HD\tVN:1.0\tSO:unsorted\n" )
    for k in keys(refs)
-      write( io, "@SQ\tSN:" )
-      tab_write( io, k )
-      write( io, "LN:" * string( refs[k] ) )
-      write( io, '\n' )
+      print( io, "@SQ\tSN:", k, "\tLN:", refs[k], '\n' )
    end
 end
 
@@ -344,42 +392,49 @@ function output_utr( io::BufOut,
                      pgraph::Nullable{PsiGraph{S}},
                      total_reads::Float64, 
                      motif::String, 
-                     sg::SpliceGraph, 
+                     sg::AnySpliceGraph, 
                      node::Int,
                      info::GeneMeta; 
-                     empty=false ) where {S <: MonotonicSet}
+                     empty=false,
+                     empty_len::Int=length(psi) ) where {S <: MonotonicSet}
 
-   st = motif == TXST_MOTIF ? node : max(1, node - 1)
-   en = st + length(psi) - 1
+   st = motif == "TS" ? node : max(1, node - 1)
+   en = st + (empty ? empty_len : length(psi)) - 1
    if en < st
       error("$psi, $total_reads, $motif, $node, $info, $empty")
    end
    i = 1
-   for n in st:en
-      tab_write( io, info[1] )
-      tab_write( io, string(n) )
-      coord_write( io, info[2], sg.nodecoord[n], sg.nodecoord[n]+sg.nodelen[n]-1, tab=true )
-      tab_write( io, info[3] )
-      tab_write( io, motif )
+   @inbounds for n in st:en
+      nc = sg.nodecoord[n]
+      nl = sg.nodelen[n]
+      write( io, info[1], UInt8('\t') )
+      write_int( io, n )
+      write( io, UInt8('\t'), info[2], UInt8(':') )
+      write_int( io, nc )
+      write( io, UInt8('-') )
+      write_int( io, nc + nl - one(CoordInt) )
+      write( io, UInt8('\t'), UInt8(info[3]), UInt8('\t'), motif, UInt8('\t') )
       if empty # had to add this flag since we iterate through the TS/TE nodes
          write( io, "NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\n" )
          i += 1
          continue
       end
-      tab_write( io, string(psi[i]) )
+      write_float( io, psi[i] )
+      write( io, UInt8('\t') )
       if !isnull( pgraph )
          conf_int  = beta_posterior_ci( psi[i], total_reads, sig=3 )
          conf_int_write( io, conf_int, tab=true, width=true)
-         tab_write( io, string( round(total_reads, digits=3) ) )
+         write_float( io, round(total_reads, digits=3) )
+         write( io, UInt8('\t') )
          complex_write( io, complexity( pgraph.value ), tab=true )
-         tab_write( io, string( round( shannon_index( pgraph.value ), digits=4 ) ) )
+         write_float( io, round( shannon_index( pgraph.value ), digits=4 ) )
+         write( io, UInt8('\t') )
          count_write( io, get(pgraph).nodes[i], get(pgraph).psi[i], tab=true )
          write( io, "NA\t" )
       else
-         tab_write( io, "NA\tNA\tNA\tNA\tNA\tNA\tNA\t" )
+         write( io, "NA\tNA\tNA\tNA\tNA\tNA\tNA\t\t" )
       end
-      write( io, "NA" )
-      write( io, '\n' )
+      write( io, "NA\n" )
       i += 1
    end
    en
@@ -392,16 +447,27 @@ function output_psi( io::BufOut,
                      total_reads::Float64, 
                      conf_int::Tuple, 
                      motif::String,
-                     sg::SpliceGraph,
+                     sg::AnySpliceGraph,
                      edges::IntervalMap{N,C},
                      node::Int,
                      info::GeneMeta,
                      bias ) where {N <: NodeNum, C <: ReadCounter, S <: MonotonicSet}
-   sg.nodelen[node] == 0 && return
-   left  = sg.nodecoord[node]
-   right = sg.nodecoord[node]+sg.nodelen[node]-one(NodeInt)
-   coordstr = coord_string( info[2], left, right, tab=false )
-   output_psi( io, psi, inc, exc, total_reads, conf_int, motif, coordstr, edges, node, info, bias )
+   @inbounds begin
+      nlen = sg.nodelen[node]
+      nlen == 0 && return
+      left  = sg.nodecoord[node]
+      right = left + nlen - one(NodeInt)
+   end
+   write( io, info[1], UInt8('\t') )
+   write_int( io, node )
+   write( io, UInt8('\t'), info[2], UInt8(':') )
+   write_int( io, left )
+   write( io, UInt8('-') )
+   write_int( io, right )
+   write( io, UInt8('\t'), UInt8(info[3]), UInt8('\t'), motif, UInt8('\t') )
+   write_float( io, psi )
+   write( io, UInt8('\t') )
+   _output_psi_tail( io, psi, inc, exc, total_reads, conf_int, edges )
 end
 
 function output_psi( io::BufOut, 
@@ -417,44 +483,54 @@ function output_psi( io::BufOut,
                      info::GeneMeta, 
                      bias ) where {N <: NodeNum, C <: ReadCounter, S <: MonotonicSet}
 
-   tab_write( io, info[1] ) # gene
-   tab_write( io, format_node_string(node) )
-   tab_write( io, coord ) #coord
-   tab_write( io, info[3] )
-   tab_write( io, motif )
-   tab_write( io, string(psi) )
+   write( io, info[1], UInt8('\t') )
+   write_edge_node( io, node )
+   write( io, UInt8('\t'), coord, UInt8('\t'), UInt8(info[3]), UInt8('\t'), motif, UInt8('\t') )
+   write_float( io, psi )
+   write( io, UInt8('\t') )
+   _output_psi_tail( io, psi, inc, exc, total_reads, conf_int, edges )
+end
 
+function _output_psi_tail( io::BufOut,
+                           psi::Float64,
+                           inc::Nullable{PsiGraph{S}},
+                           exc::Nullable{PsiGraph{S}},
+                           total_reads::Float64,
+                           conf_int::Tuple,
+                           edges::IntervalMap{N,C} ) where {N <: NodeNum, C <: ReadCounter, S <: MonotonicSet}
    conf_int_write( io, conf_int, tab=true, width=true )
-   tab_write( io, string( round(total_reads, digits=3) ) )
+   write_float( io, round(total_reads, digits=3) )
+   write( io, UInt8('\t') )
 
    if !isnull( inc ) && !isnull( exc )
       complex_write( io, complexity( inc.value, exc.value ), tab=true )
-      tab_write( io, string( round( shannon_index( inc.value, exc.value ), digits=4 ) ) )
+      write_float( io, round( shannon_index( inc.value, exc.value ), digits=4 ) )
+      write( io, UInt8('\t') )
    else
       write( io, "K0\t0.0\t" )
    end
 
-   min,max = 10000000,0
+   min_n,max_n = 10000000.0,0.0
    if !isnull( inc )
       count_write( io, get(inc), psi, tab=true )
-      min,max = get(inc).min,get(inc).max
+      min_n,max_n = get(inc).min,get(inc).max
    else
       write( io, "NA\t" )
    end
 
    if !isnull( exc )
       count_write( io, get(exc), 1.0-psi, tab=true )
-      min = get(exc).min < min ? get(exc).min : min
-      max = get(exc).max > max ? get(exc).max : max
+      min_n = get(exc).min < min_n ? get(exc).min : min_n
+      max_n = get(exc).max > max_n ? get(exc).max : max_n
    else
       write( io, "NA\t" )
    end
 
-   edges_write( io, edges, min:max )
-   write( io, '\n' )
+   edges_write( io, edges, min_n:max_n )
+   write( io, UInt8('\n') )
 end
 
-function output_circular( io::BufOut, sg::SpliceGraph, sgquant::SpliceGraphQuant, info::GeneMeta )
+function output_circular( io::BufOut, sg::AnySpliceGraph, sgquant::SpliceGraphQuant, info::GeneMeta )
    for (st,en) in keys(sgquant.circ)
       back_len = 0.0
       back_cnt = 0.0
@@ -468,69 +544,96 @@ function output_circular( io::BufOut, sg::SpliceGraph, sgquant::SpliceGraphQuant
       total_reads = (fore_cnt + back_cnt)
       psi = fore_cnt / total_reads
       if !isnan(psi) && total_reads > 0
-         tab_write( io, info[1] )
-         tab_write( io, string(st) * "-" * string(en) )
+         write( io, info[1], UInt8('\t') )
+         write_int( io, st )
+         write( io, UInt8('-') )
+         write_int( io, en )
+         write( io, UInt8('\t') )
          coord_write( io, info[2], sg.nodecoord[st]+sg.nodelen[st]-1, sg.nodecoord[en], tab=true )
-         tab_write( io, info[3] )
-         tab_write( io, "BS" )
-         tab_write( io, string(psi) )
+         write( io, UInt8(info[3]), "\tBS\t" )
+         write_float( io, psi )
+         write( io, UInt8('\t') )
          conf_int  = beta_posterior_ci( psi, total_reads, sig=3 )
          conf_int_write( io, conf_int, tab=true, width=true)
-         tab_write( io, string( round(total_reads, digits=3) ) )
-         write( io, "NA\tNA\tNA\tNA\tNA\n" )
+         write_float( io, round(total_reads, digits=3) )
+         write( io, "\tNA\tNA\tNA\tNA\tNA\n" )
       end
    end
 end
 
 
 
-function output_empty( io::BufOut, motif::String, sg::SpliceGraph, node::Int, info::GeneMeta )
-   sg.nodelen[node] == 0 && return
-   tab_write( io, info[1] )
-   tab_write( io, string(node) )
-   coord_write( io, info[2], sg.nodecoord[node], sg.nodecoord[node]+sg.nodelen[node]-1, tab=true )
-   tab_write( io, info[3] )
-   tab_write( io, motif )
-   write( io, "NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\n" )
+function output_empty( io::BufOut, motif::String, sg::AnySpliceGraph, node::Int, info::GeneMeta )
+   @inbounds begin
+      nlen = sg.nodelen[node]
+      nlen == 0 && return
+      ncoord = sg.nodecoord[node]
+      write( io, info[1], UInt8('\t') )
+      write_int( io, node )
+      write( io, UInt8('\t'), info[2], UInt8(':') )
+      write_int( io, ncoord )
+      write( io, UInt8('-') )
+      write_int( io, ncoord + nlen - one(CoordInt) )
+      write( io, UInt8('\t'), UInt8(info[3]), UInt8('\t'), motif, "\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\n" )
+   end
+end
+
+function write_monotonic_set( io::BufOut, is::S ) where S <: MonotonicSet
+   first_el = true
+   for n in is
+      !first_el && write( io, UInt8('-') )
+      write_edge_node( io, n )
+      first_el = false
+   end
 end
 
 function Base.string( is::S ) where S <: MonotonicSet
-   str = ""
+   buf = IOBuffer()
+   first_el = true
    for n in is
-      str *= format_edge_string(n) * "-"
+      !first_el && write( buf, '-' )
+      write( buf, format_edge_string(n) )
+      first_el = false
    end
-   str[1:end-1]
+   String(take!(buf))
+end
+
+function count_write( io::BufOut, nodestr::S, psi::Float64; tab=false ) where S <: MonotonicSet
+   write_monotonic_set( io, nodestr )
+   write( io, UInt8(':') )
+   write_float( io, round(psi, digits=6) )
+   tab && write( io, UInt8('\t') )
 end
 
 function count_write( io::BufOut, nodestr, psi::Float64; tab=false )
-   write( io, string(nodestr) )
-   write( io, ':' )
-   write( io, string(round(psi, digits=6)) )
-   tab && write( io, '\t' )
+   print( io, nodestr )
+   write( io, UInt8(':') )
+   write_float( io, round(psi, digits=6) )
+   tab && write( io, UInt8('\t') )
 end
 
 function count_write( io::BufOut, nodestr, psi::String; tab=false )
-   write( io, string(nodestr) )
-   write( io, ':' )
-   write( io, psi )
-   tab && write( io, '\t' )
+   print( io, nodestr )
+   write( io, UInt8(':'), psi )
+   tab && write( io, UInt8('\t') )
 end
 
 function count_write( io::BufOut, pgraph::PsiGraph, psi::Float64; tab=false )
    start = 1
-   if psi == 1.0 && length(pgraph.nodes) > 1
-      for i in 1:length(pgraph.nodes)-1
-         write( io, string(pgraph.nodes[i]) )
-         write( io, ',' )
+   n_nodes = length(pgraph.nodes)
+   if psi == 1.0 && n_nodes > 1
+      @inbounds for i in 1:n_nodes-1
+         write_monotonic_set( io, pgraph.nodes[i] )
+         write( io, UInt8(',') )
       end
-      start = length(pgraph.nodes)
+      start = n_nodes
    end
-   for i in start:length(pgraph.nodes)
+   @inbounds for i in start:n_nodes
       curpsi = i > length(pgraph.psi) ? psi : pgraph.psi[i]
       count_write( io, pgraph.nodes[i], curpsi )
-      (i < length(pgraph.nodes)) && write( io, "," )
+      (i < n_nodes) && write( io, UInt8(',') )
    end
-   tab && write( io, '\t' )
+   tab && write( io, UInt8('\t') )
 end
 
 function output_psi_header( io::BufOut )
@@ -585,41 +688,48 @@ end
 #
 =#
 
-function count_annotated_edges( sg::SpliceGraph, sgquant::SpliceGraphQuant )
+function count_annotated_edges( sg::AnySpliceGraph, sgquant::SpliceGraphQuant )
    annoreads  = 0.0
    annocnt    = 0
    totalreads = 0.0
    totalcnt   = 0
+   apaths = sg.annopath
    for edg in sgquant.edge
-      totalreads += get(edg.value)
+      v = get(edg.value)
+      totalreads += v
       totalcnt   += 1
-      if edg in sg.annopath
-         annoreads += get(edg.value)
+      if edg in apaths
+         annoreads += v
          annocnt   += 1
       end
    end
    annoreads,annocnt,totalreads,totalcnt
 end
 
-function count_read_types( lib::GraphLib, graphq::GraphLibQuant )
+function count_read_types( lib::SeqLibrary, graphq::GraphLibQuant )
    bodyreads = 0.0
    juncreads = 0.0
    annoreads = 0.0
    junccnt   = 0
    annocnt   = 0
-   for i in 1:length(lib.graphs)
-      bodyreads += sum(map(get, graphq.quant[i].node))
-      areads,acnt,treads,tcnt = count_annotated_edges( lib.graphs[i], graphq.quant[i] )
-      annoreads += areads
-      juncreads += treads
-      annocnt   += acnt
-      junccnt   += tcnt
+   @inbounds for i in 1:length(lib.graphs)
+      sgq = graphq.quant[i]
+      for node in sgq.node
+         bodyreads += get(node)
+      end
+      if !isempty(sgq.edge)
+         areads,acnt,treads,tcnt = count_annotated_edges( lib.graphs[i], sgq )
+         annoreads += areads
+         juncreads += treads
+         annocnt   += acnt
+         junccnt   += tcnt
+      end
    end
    Int(round(bodyreads)),Int(round(juncreads)),Int(round(annoreads)),junccnt,annocnt
 end
 
 function output_stats( filename::String, 
-                       lib::GraphLib, 
+                       lib::SeqLibrary, 
                        graphq::GraphLibQuant, 
                        param::AlignParam,
                        index::String, 
@@ -639,7 +749,7 @@ function output_stats( filename::String,
 end
 
 function output_stats( io::BufOut, 
-                       lib::GraphLib, 
+                       lib::SeqLibrary, 
                        graphq::GraphLibQuant, 
                        param::AlignParam,
                        index::String, 
@@ -675,7 +785,7 @@ function output_stats( io::BufOut,
 end
 
 
-function output_junctions( filename::String, lib::GraphLib, graphq::GraphLibQuant )
+function output_junctions( filename::String, lib::SeqLibrary, graphq::GraphLibQuant )
    io = open( filename, "w" )
    stream = ZlibDeflateOutputStream( io )
 
@@ -685,15 +795,40 @@ function output_junctions( filename::String, lib::GraphLib, graphq::GraphLibQuan
    close(io)
 end
 
-function output_junctions( io::BufOut, lib::GraphLib, graphq::GraphLibQuant )
-   function write_junctions( sg::SpliceGraph, sgquant::SpliceGraphQuant, i::Int )
-      for edg in sgquant.edge
-         if sg.edgetype[edg.first+1] in (EDGETYPE_LS, EDGETYPE_LL, EDGETYPE_LR) &&
-            sg.edgetype[edg.last]    in (EDGETYPE_SR, EDGETYPE_RR, EDGETYPE_LR)
+function output_junctions( io::BufOut, lib::SeqLibrary, graphq::GraphLibQuant )
+   function write_junction( sg::AnySpliceGraph, edg::IntervalValue, i::Int, str::String )
+      info_i = @inbounds lib.info[i]
+      if info_i.strand
+         donor    = @inbounds sg.nodecoord[edg.first]+sg.nodelen[edg.first]-1
+         acceptor = @inbounds sg.nodecoord[edg.last]
+      else
+         donor    = @inbounds sg.nodecoord[edg.last]+sg.nodelen[edg.last]-1
+         acceptor = @inbounds sg.nodecoord[edg.first]
+      end
+      write( io, info_i.name, UInt8('\t') )
+      write_int( io, donor )
+      write( io, UInt8('\t') )
+      write_int( io, acceptor )
+      write( io, UInt8('\t'), info_i.gene, UInt8(':') )
+      write_int( io, edg.first )
+      write( io, UInt8('-') )
+      write_int( io, edg.last )
+      write( io, UInt8(':'), str, UInt8('\t') )
+      write_float( io, get(edg.value) )
+      write( io, UInt8('\t'), info_i.strand ? UInt8('+') : UInt8('-'), UInt8('\n') )
+   end
 
-            if inall( edg, sg.annopath )
+   function write_junctions( sg::AnySpliceGraph, sgquant::SpliceGraphQuant, i::Int )
+      isempty(sgquant.edge) && return
+      et = sg.edgetype
+      ap = sg.annopath
+      @inbounds for edg in sgquant.edge
+         if et[edg.first+1] in (EDGETYPE_LS, EDGETYPE_LL, EDGETYPE_LR) &&
+            et[edg.last]    in (EDGETYPE_SR, EDGETYPE_RR, EDGETYPE_LR)
+
+            if inall( edg, ap )
                write_junction( sg, edg, i, "CON_ANNO" )
-            elseif edg in sg.annopath
+            elseif edg in ap
                write_junction( sg, edg, i, "ALT_ANNO" )
             else # unique edge
                write_junction( sg, edg, i, "ALT_UNIQ" )
@@ -702,27 +837,8 @@ function output_junctions( io::BufOut, lib::GraphLib, graphq::GraphLibQuant )
       end
    end
 
-   function write_junction( sg::SpliceGraph, edg::IntervalValue, i::Int, str::String )
-      tab_write( io, lib.info[i].name )
-      if lib.info[i].strand
-         donor    = sg.nodecoord[edg.first]+sg.nodelen[edg.first]-1
-         acceptor = sg.nodecoord[edg.last]
-      else
-         donor    = sg.nodecoord[edg.last]+sg.nodelen[edg.last]-1
-         acceptor = sg.nodecoord[edg.first]
-      end
-      tab_write( io, string(donor) )
-      tab_write( io, string(acceptor) )
-      plug_write( io, lib.info[i].gene, plug=':' )
-      plug_write( io, string(edg.first), plug='-' )
-      plug_write( io, string(edg.last), plug=':' )
-      tab_write( io, str )
-      tab_write( io, string(get(edg.value)) )
-      end_write( io, lib.info[i].strand ? '+' : '-' )
-   end
-
    write( io, "CHROM\tDONOR_COORD\tACCEPTOR_COORD\tGENEID:NODES:TYPE\tREADCOUNT\tSTRAND\n")
-   for i in 1:length(lib.graphs)
+   @inbounds for i in 1:length(lib.graphs)
       write_junctions( lib.graphs[i], graphq.quant[i], i )
    end
 end

@@ -158,7 +158,7 @@ mutable struct SpliceGraphQuant{C <: SGAlignContainer, R <: ReadCounter}
    leng::Vector{Float64}
    bias::Float64
 
-   function SpliceGraphQuant{C,R}( sg::SpliceGraph ) where {C <: SGAlignContainer, R <: ReadCounter}
+   function SpliceGraphQuant{C,R}( sg::AnySpliceGraph ) where {C <: SGAlignContainer, R <: ReadCounter}
       return new( R[zero(R) for x in 1:length(sg.nodelen)],
              IntervalMap{NodeInt,R}(),
              IntervalMap{NodeFloat,R}(),
@@ -199,27 +199,37 @@ struct GraphLibQuant{C <: SGAlignContainer, R <: ReadCounter}
    quant::Vector{SpliceGraphQuant{C,R}} # splice graph quant structs for gene
    classes::Vector{IsoCompat}           # isoform compatibility classes
 
-   function GraphLibQuant{C,R}( lib::GraphLib ) where {C <: SGAlignContainer, R <: ReadCounter}
-      isonum = zeros(Int, length(lib.graphs))
-      for i in 1:length(lib.graphs)
-         isonum[i] = length(lib.graphs[i].annoname)
+   function GraphLibQuant{C,R}( lib::SeqLibrary ) where {C <: SGAlignContainer, R <: ReadCounter}
+      ngenes = length(lib.graphs)
+      isonum = Vector{Int}(undef, ngenes)
+      isolen = 0
+      @inbounds for i in 1:ngenes
+         ni = length(lib.graphs[i].annoname)
+         isonum[i] = ni
+         isolen += ni
       end
-      isolen  = sum( isonum )
-      tpm     = zeros( isolen )
-      count   = zeros( isolen )
-      leng    = zeros( isolen )
-      geneoff = zeros(Int, length(lib.graphs))
-      genetpm = zeros( length(lib.graphs) )
-      quant   = Vector{SpliceGraphQuant}(undef, length(lib.graphs))
+      tpm     = zeros( Float64, isolen )
+      count   = zeros( Float64, isolen )
+      leng    = zeros( Int64, isolen )
+      geneoff = Vector{Int64}(undef, ngenes)
+      genetpm = zeros( Float64, ngenes )
+      quant   = Vector{SpliceGraphQuant{C,R}}(undef, ngenes)
       classes = Vector{IsoCompat}()
       cumul_i = 0
-      for i in 1:length(lib.graphs)
+      @inbounds for i in 1:ngenes
          geneoff[i] = cumul_i
-         for j in 1:length(lib.graphs[i].annopath)
-            leng[cumul_i+j] = sum(map( y->lib.graphs[i].nodelen[y], collect(lib.graphs[i].annopath[j]) ))
+         sg = lib.graphs[i]
+         nlen = sg.nodelen
+         apaths = sg.annopath
+         for j in 1:length(apaths)
+            s = Int64(0)
+            for y in apaths[j]
+               s += Int64(nlen[y])
+            end
+            leng[cumul_i + j] = s
          end
          cumul_i += isonum[i]
-         quant[i] = SpliceGraphQuant{C,R}( lib.graphs[i] )
+         quant[i] = SpliceGraphQuant{C,R}( sg )
       end
       new( tpm, count, leng, geneoff, genetpm, quant, classes )
    end
@@ -259,24 +269,29 @@ end
 primer_adjust!( gquant::GraphLibQuant{C,R}, mod::B ) where {C <: SGAlignContainer, R <: ReadCounter, B <: BiasModel} = adjust!( gquant, mod, primer_adjust! )
 gc_adjust!( gquant::GraphLibQuant{C,R}, mod::B ) where {C <: SGAlignContainer, R <: ReadCounter, B <: BiasModel} = adjust!( gquant, mod, gc_adjust! )
 
-function gc_normalize!( mod::JointBiasMod, lib::GraphLib, quant::GraphLibQuant )
-   for i in 1:length(lib.graphs)
+function gc_normalize!( mod::JointBiasMod, lib::SeqLibrary, quant::GraphLibQuant )
+   @inbounds for i in 1:length(lib.graphs)
       sg  = lib.graphs[i]
       idx = quant.geneidx[i]
       for j in 1:length(sg.annobias)
-         add_to_back!( mod.gcback, sg.annobias[j], quant.tpm[j+idx] )
+         w = quant.tpm[j+idx]
+         w > 0.0 && add_to_back!( mod.gcback, sg.annobias[j], w )
       end
    end
    foresum = sum(mod.gcfore)
    backsum = sum(mod.gcback)
    @inbounds for i in 1:length(mod.gcfore)
-      @fastmath mod.gcfore[i] /= foresum
-      @fastmath mod.gcback[i] /= backsum
+      if foresum > 0.0
+         @fastmath mod.gcfore[i] /= foresum
+      end
+      if backsum > 0.0
+         @fastmath mod.gcback[i] /= backsum
+      end
    end
    mod
 end
 
-@inbounds function set_gene_tpm!( quant::GraphLibQuant, lib::GraphLib )
+@inbounds function set_gene_tpm!( quant::GraphLibQuant, lib::SeqLibrary )
    for i in 1:length(lib.graphs)
       tpm = 0.0
       curidx = quant.geneidx[i]
@@ -389,69 +404,91 @@ end
 end
 
 # build compatibility classes from SpliceGraphQuant node and edge "counts"
-@inbounds function build_equivalence_classes!( graphq::GraphLibQuant, lib::GraphLib; assign_long=true )
+@inbounds function build_equivalence_classes!( graphq::GraphLibQuant, lib::SeqLibrary; assign_long=true )
    # initialize re-used data structures
    sset = SortedSet{NodeFloat}()
    iset = BitSet()
-   # resize!(iset.bits, 64)
-   temp = Dict{Vector{Int},Float64}()
+   temp = Dict{BitSet,Float64}()
 
    @inline function handle_iset_value!( idx, value )
-      if length(iset) == 1
+      n_iso = length(iset)
+      if n_iso == 1
          graphq.count[first(iset) + idx] += value
-      elseif length(iset) > 1
-         arr = collect(iset)
-         if haskey(temp, arr)
-            temp[arr] += value
+      elseif n_iso > 1
+         ht_idx = Base.ht_keyindex(temp, iset)
+         if ht_idx > 0
+            @inbounds temp.vals[ht_idx] += value
          else
-            temp[arr] = value
+            temp[copy(iset)] = value
          end
       end
    end
 
    # go through splice graphs (to re-use temp data structures)
    for i in 1:length(lib.graphs)
+      sg = lib.graphs[i]
+      sgq = graphq.quant[i]
+      apaths = sg.annopath
+      n_anno = length(apaths)
+      gidx = graphq.geneidx[i]
+
       # go through single node mapping reads
-      for n in 1:length(graphq.quant[i].node)
-         for p in 1:length(lib.graphs[i].annopath)
-            if n in lib.graphs[i].annopath[p]
+      nodes = sgq.node
+      for n in 1:length(nodes)
+         val = get(nodes[n])
+         val > 0.0 || continue
+         for p in 1:n_anno
+            if n in apaths[p]
                push!(iset, p)
             end
          end
-         handle_iset_value!( graphq.geneidx[i], get(graphq.quant[i].node[n]) )
+         handle_iset_value!( gidx, val )
          empty!(iset)
       end
       # go through edges
-      for edg in graphq.quant[i].edge
-         for p in 1:length(lib.graphs[i].annopath)
-            if edg in lib.graphs[i].annopath[p]
+      for edg in sgq.edge
+         val = get(edg.value)
+         val > 0.0 || continue
+         for p in 1:n_anno
+            if edg in apaths[p]
                push!(iset, p)
             end
          end
-         handle_iset_value!( graphq.geneidx[i], get(edg.value) )
+         handle_iset_value!( gidx, val )
          empty!(iset)
       end
       # go through multi-edge crossing paths
-      for align in keys(graphq.quant[i].long)
-         for p in 1:length(lib.graphs[i].annopath)
-            if align in lib.graphs[i].annopath[p]
-               push!(iset, p)
+      for (align, cnt) in sgq.long
+         val = get(cnt)
+         if val > 0.0
+            for p in 1:n_anno
+               if align in apaths[p]
+                  push!(iset, p)
+               end
             end
+            handle_iset_value!( gidx, val )
+            empty!(iset)
          end
-         handle_iset_value!( graphq.geneidx[i], get(graphq.quant[i].long[align]) )
-         empty!(iset)
-         empty!(sset)
          if assign_long
-            assign_path!( graphq, align, get(graphq.quant[i].long[align]), sset )
+            empty!(sset)
+            assign_path!( graphq, align, val, sset )
          end
       end
       # create compatibility classes for isoforms
-      for arr in keys(temp)
-         if temp[arr] > 0.0
-            push!( graphq.classes, IsoCompat(arr .+ graphq.geneidx[i], temp[arr]) )
+      if !isempty(temp)
+         for (bset, val) in temp
+            if val > 0.0
+               arr = Vector{Int}(undef, length(bset))
+               k = 1
+               for p in bset
+                  arr[k] = p + gidx
+                  k += 1
+               end
+               push!( graphq.classes, IsoCompat(arr, val) )
+            end
          end
+         empty!(temp)
       end
-      empty!(temp)
    end
 end
 
@@ -459,16 +496,18 @@ end
 # This function takes a vector of alignments and returns the compatibility class
 # and a boolean describing whether or not we can assign the read through EM
 @inbounds function equivalence_class( graphq::GraphLibQuant,
-                                      lib::GraphLib,
+                                      lib::SeqLibrary,
                                       cont::Vector{C},
                                       temp_iset::BitSet=BitSet() ) where C <: SGAlignContainer
    matches_all = true
    for path in cont
       g = path.fwd[1].gene
       has_match = false
-      for p in 1:length(lib.graphs[g].annopath)
-         if path in lib.graphs[g].annopath[p]
-            push!(temp_iset, p + graphq.geneidx[g])
+      apaths = lib.graphs[g].annopath
+      gidx = graphq.geneidx[g]
+      for p in 1:length(apaths)
+         if path in apaths[p]
+            push!(temp_iset, p + gidx)
             has_match = true
          end
       end
@@ -495,7 +534,7 @@ mutable struct MultiCompat{R} <: EquivalenceClass
    postassign::Bool
    raw::R
 
-   function MultiCompat{R}( graphq::GraphLibQuant{C,R}, lib::GraphLib, cont::Vector{C}, temp_iset::BitSet=BitSet() ) where {C <: SGAlignContainer, R <: ReadCounter}
+   function MultiCompat{R}( graphq::GraphLibQuant{C,R}, lib::SeqLibrary, cont::Vector{C}, temp_iset::BitSet=BitSet() ) where {C <: SGAlignContainer, R <: ReadCounter}
       class,matches = equivalence_class( graphq, lib, cont, temp_iset )
       new( class, ones(length(class)) / length(class), 1.0, 1.0, !matches, !matches, zero(R) )
    end
@@ -524,13 +563,14 @@ function Base.push!( ambig::MultiMapping{SGAlignSingle,R},
                      alns::Vector{SGAlignment}, 
                      value,
                      graphq::GraphLibQuant, 
-                     lib::GraphLib ) where R <: ReadCounter
+                     lib::SeqLibrary ) where R <: ReadCounter
    cont = Vector{SGAlignSingle}(undef, length(alns))
-   for i in 1:length(alns)
+   @inbounds for i in 1:length(alns)
       cont[i] = SGAlignSingle( alns[i].path )
    end
-   if haskey( ambig.map, cont )
-      push!( ambig.map[cont].raw, value )
+   mc = get( ambig.map, cont, nothing )
+   if mc !== nothing
+      push!( mc.raw, value )
    else
       mc = MultiCompat{R}( graphq, lib, cont, ambig.iset )
       push!( mc.raw, value )
@@ -543,13 +583,14 @@ function Base.push!( ambig::MultiMapping{SGAlignPaired,R},
                      rev::Vector{SGAlignment}, 
                      value,
                      graphq::GraphLibQuant, 
-                     lib::GraphLib ) where R <: ReadCounter
+                     lib::SeqLibrary ) where R <: ReadCounter
    cont = Vector{SGAlignPaired}( undef, length(fwd) )
-   for i in 1:length(fwd)
+   @inbounds for i in 1:length(fwd)
       cont[i] = SGAlignPaired( fwd[i].path, rev[i].path )
    end
-   if haskey( ambig.map, cont )
-      push!( ambig.map[cont].raw, value )
+   mc = get( ambig.map, cont, nothing )
+   if mc !== nothing
+      push!( mc.raw, value )
    else
       mc = MultiCompat{R}( graphq, lib, cont, ambig.iset )
       push!( mc.raw, value )
@@ -576,13 +617,15 @@ gc_adjust!( multi::MultiMapping{C,R}, mod::B ) where {C <: SGAlignContainer, R <
 # for a given alignment container, set the temp_iset in multi to the compatibility class
 @inbounds function set_equivalence_class!( multi::MultiMapping{C,R}, 
                                            graphq::GraphLibQuant,
-                                           lib::GraphLib, 
+                                           lib::SeqLibrary, 
                                            aln::C ) where {C <: SGAlignContainer, R <: ReadCounter}
    empty!(multi.iset)
    g = aln.fwd[1].gene
-   for p in 1:length(lib.graphs[g].annopath)
-      if aln in lib.graphs[g].annopath[p]
-         push!(multi.iset, p + graphq.geneidx[g])
+   apaths = lib.graphs[g].annopath
+   gidx = graphq.geneidx[g]
+   for p in 1:length(apaths)
+      if aln in apaths[p]
+         push!(multi.iset, p + gidx)
       end
    end
 end
@@ -598,37 +641,52 @@ function get_class_value( iset::BitSet, compat::MultiCompat )
 end
 
 function assign_ambig!( graphq::GraphLibQuant{C,R}, 
-                        lib::GraphLib, 
+                        lib::SeqLibrary, 
                         ambig::MultiMapping{C,R} ) where {C <: SGAlignContainer, R <: ReadCounter}
+   vals = Float64[]
    @inbounds for (vp,mc) in ambig.map
-      # store relative weight of each alignment path
-      vals = zeros(length(vp))
+      n_vp = length(vp)
+      resize!(vals, n_vp)
 
       if mc.postassign  # not all paths match annotated transcripts, use gene level values to assign
          total_tpm = 0.0
-         for i in 1:length(vp)
-            vals[i] = graphq.genetpm[ vp[i].fwd[1].gene ]
-            total_tpm += vals[i]
+         for i in 1:n_vp
+            v = graphq.genetpm[ vp[i].fwd[1].gene ]
+            vals[i] = v
+            total_tpm += v
          end
-         @fastmath vals /= sum(vals)
+         if total_tpm > 0.0
+            for i in 1:n_vp
+               @fastmath vals[i] /= total_tpm
+            end
+         else
+            inv_n = 1.0 / n_vp
+            for i in 1:n_vp
+               vals[i] = inv_n
+            end
+         end
       else # assign based on transcripts
-         # since two alignments for a read can match the same transcript
-         # lets sum the prop values of the MultiCompat for each alignment
-         # then we normalize by the total sum of those, and assign reads accordingly.
-         # Example: imagine a single read matches the same transcript in two positions
-         # that creates a single MultiCompat object that has two alignments hitting the same
-         # transcript class.  This method would assign that prop to both, and then re-normalize
-         # so that the total count of the MultiCompat is assigned for the sum of the alignments
-         vals = zeros(length(vp))
-         for i in 1:length(vp)
+         total_v = 0.0
+         for i in 1:n_vp
             set_equivalence_class!( ambig, graphq, lib, vp[i] )
-            vals[i] = get_class_value( ambig.iset, mc )
+            v = get_class_value( ambig.iset, mc )
+            vals[i] = v
+            total_v += v
          end
-         @fastmath vals /= sum(vals)
+         if total_v > 0.0
+            for i in 1:n_vp
+               @fastmath vals[i] /= total_v
+            end
+         else
+            inv_n = 1.0 / n_vp
+            for i in 1:n_vp
+               vals[i] = inv_n
+            end
+         end
       end
 
       # now assign alignment paths proportional to their weight
-      for i in 1:length(vp)
+      for i in 1:n_vp
          assign_path!( graphq, vp[i], vals[i] * mc.count, ambig.iset )
       end
    end
@@ -731,15 +789,34 @@ end
                                  counts::Vector{Float64}=quant.count; 
                                  readlen::Int64=50, 
                                  sig::Int64=1 )
-   for i in 1:length(counts)
-      @fastmath quant.tpm[ i ] = counts[i] / max( (quant.length[i] - readlen), 1.0 )
-   end
-   rpk_sum = max( sum( quant.tpm ), 1.0 )
-   for i in 1:length(quant.tpm)
-      if sig > 0
-         @fastmath quant.tpm[i] = round( quant.tpm[i] * SCALING_FACTOR / rpk_sum, digits=sig )
+   tpm = quant.tpm
+   leng = quant.length
+   rpk_sum = 0.0
+   @inbounds for i in 1:length(counts)
+      c = counts[i]
+      if c != 0.0
+         v = @fastmath c / max( Float64(leng[i] - readlen), 1.0 )
+         tpm[i] = v
+         rpk_sum += v
       else
-         @fastmath quant.tpm[i] = ( quant.tpm[i] * SCALING_FACTOR / rpk_sum )
+         tpm[i] = 0.0
+      end
+   end
+   rpk_sum = max( rpk_sum, 1.0 )
+   scale = @fastmath SCALING_FACTOR / rpk_sum
+   if sig > 0
+      @inbounds for i in 1:length(tpm)
+         v = tpm[i]
+         if v != 0.0
+            @fastmath tpm[i] = round( v * scale, digits=sig )
+         end
+      end
+   else
+      @inbounds for i in 1:length(tpm)
+         v = tpm[i]
+         if v != 0.0
+            @fastmath tpm[i] = v * scale
+         end
       end
    end
 end
@@ -753,20 +830,20 @@ global_bias( graphq::GraphLibQuant ) = 1.0,0.0
 # inside of a node for which a read could map without overlapping a junction
 # is put into units of junction derived effective_length
 # kadj is minimum of (readlength - minalignlen) and k-1
-@inline function eff_length( node, sg::SpliceGraph, eff_len::Int, kadj::Int )
+@inline function eff_length( node, sg::AnySpliceGraph, eff_len::Int, kadj::Int )
    len = sg.nodelen[node] + (istxstart( sg.edgetype[node] ) ? 0 : kadj) +
                             (istxstop( sg.edgetype[node+1] ) ? 0 : kadj)
    @fastmath len / eff_len
 end
 
-function eff_lengths!( sg::SpliceGraph, sgquant::SpliceGraphQuant, eff_len::Int, kadj::Int )
-   for i in 1:length( sg.nodelen )
+function eff_lengths!( sg::AnySpliceGraph, sgquant::SpliceGraphQuant, eff_len::Int, kadj::Int )
+   @inbounds for i in 1:length( sg.nodelen )
       sgquant.leng[i] = sg.nodelen[i] #eff_length( i, sg, eff_len, kadj )
    end
 end
 
-function effective_lengths!( lib::GraphLib, graphq::GraphLibQuant, eff_len::Int, kadj::Int )
-   for i in 1:length( lib.graphs )
+function effective_lengths!( lib::SeqLibrary, graphq::GraphLibQuant, eff_len::Int, kadj::Int )
+   @inbounds for i in 1:length( lib.graphs )
       eff_lengths!( lib.graphs[i], graphq.quant[i], eff_len, kadj )
    end
 end
@@ -778,15 +855,22 @@ function unsafe_copy!( dest::Vector{T}, src::Vector{T}; indx_shift=0 ) where T <
 end
 
 function copy_isdone!( dest::Vector{T}, src::Vector{T}, denominator::Float64=1.0, sig::Int=4 ) where T <: AbstractFloat
+   if denominator == 0.0
+      @inbounds for i in 1:length(dest)
+         dest[i] = zero(T)
+      end
+      return true
+   end
    isdifferent = false
-   for i in 1:length(dest)
-      val = round( src[i] / denominator, digits=sig )
+   @inbounds for i in 1:length(dest)
+      s = src[i]
+      val = s == 0.0 ? zero(T) : round( s / denominator, digits=sig )
       if val != dest[i]
          isdifferent = true
       end
-      dest[i] = isnan(val) ? 0.0 : val
+      dest[i] = isnan(val) ? zero(T) : val
    end
-   !isdifferent || sum(denominator) == 0
+   !isdifferent
 end
 
 # This function performs expectation maximization
@@ -801,48 +885,155 @@ function gene_em!( quant::GraphLibQuant,
                    sig::Int64=4, 
                    readlen::Int64=50 ) where {C <: SGAlignContainer, R <: ReadCounter}
 
-   count_temp = ones(length(quant.count))
-   tpm_temp   = ones(length(quant.count))
-   prop_temp  = zeros( 500 )
-   uniqsum    = sum(quant.count)
-   ambigsum   = length(ambig.map)
+   n_iso      = length(quant.count)
+   count_temp = copy(quant.count)
+   tpm        = quant.tpm
+   qcount     = quant.count
+   qleng      = quant.length
 
-   @inline function maximize_and_assign!( eq::E, maximize::Bool=true ) where E <: EquivalenceClass
-      eq.isdone && return
-      if maximize
-         eq.prop_sum = 0.0
-         c = 1
-         for i in eq.class
-            cur_tpm = quant.tpm[i]
-            prop_temp[c] = cur_tpm
-            eq.prop_sum += cur_tpm
-            c += 1
-         end
-         eq.isdone = copy_isdone!( eq.prop, prop_temp, eq.prop_sum )
-      end
-      c = 1
-      for i in eq.class
-         if eq.isdone
-            quant.count[i] += eq.prop[c] * eq.count
-         end
-         count_temp[i] += eq.prop[c] * eq.count
-         c += 1
+   # Collect active (unconverged) equivalence classes into dense vectors and track active isoforms
+   is_active_iso = falses(n_iso)
+   @inbounds for i in 1:n_iso
+      if qcount[i] != 0.0 || tpm[i] != 0.0
+         is_active_iso[i] = true
       end
    end
 
-   while tpm_temp != quant.tpm && it < maxit
-
-      unsafe_copy!( count_temp, quant.count )
-      unsafe_copy!( tpm_temp, quant.tpm )
-
-      for eq in values(ambig.map)
-         maximize_and_assign!( eq, (it > 1) )
+   max_class_len = 500
+   active_ambig = MultiCompat{R}[]
+   sizehint!(active_ambig, length(ambig.map))
+   for eq in values(ambig.map)
+      eq.isdone && continue
+      push!(active_ambig, eq)
+      cl = eq.class
+      length(cl) > max_class_len && (max_class_len = length(cl))
+      @inbounds for idx in cl
+         is_active_iso[idx] = true
       end
-      for eq in quant.classes
-         maximize_and_assign!( eq, (it > 1) )
+   end
+
+   active_classes = IsoCompat[]
+   sizehint!(active_classes, length(quant.classes))
+   for eq in quant.classes
+      eq.isdone && continue
+      push!(active_classes, eq)
+      cl = eq.class
+      length(cl) > max_class_len && (max_class_len = length(cl))
+      @inbounds for idx in cl
+         is_active_iso[idx] = true
+      end
+   end
+
+   active_iso = Int[]
+   sizehint!(active_iso, count(is_active_iso))
+   @inbounds for i in 1:n_iso
+      is_active_iso[i] && push!(active_iso, i)
+   end
+
+   # Precompute inverse effective lengths for active isoforms
+   n_act_iso = length(active_iso)
+   inv_eff_len = Vector{Float64}(undef, n_act_iso)
+   @inbounds for k in 1:n_act_iso
+      i = active_iso[k]
+      inv_eff_len[k] = 1.0 / max( Float64(qleng[i] - readlen), 1.0 )
+   end
+
+   prop_temp = zeros(Float64, max_class_len)
+
+   @inline function maximize_and_assign!( eq::E, maximize::Bool ) where E <: EquivalenceClass
+      cl = eq.class
+      pr = eq.prop
+      cnt = eq.count
+      n_cl = length(cl)
+      if maximize
+         psum = 0.0
+         @inbounds for c in 1:n_cl
+            cur_tpm = tpm[cl[c]]
+            prop_temp[c] = cur_tpm
+            psum += cur_tpm
+         end
+         eq.prop_sum = psum
+         eq.isdone = copy_isdone!( pr, prop_temp, psum )
+      end
+      if eq.isdone
+         @inbounds for c in 1:n_cl
+            idx = cl[c]
+            inc = pr[c] * cnt
+            qcount[idx] += inc
+            count_temp[idx] += inc
+         end
+      else
+         @inbounds for c in 1:n_cl
+            count_temp[cl[c]] += pr[c] * cnt
+         end
+      end
+      return eq.isdone
+   end
+
+   changed = true
+   while changed && it < maxit
+      @inbounds for k in 1:n_act_iso
+         i = active_iso[k]
+         count_temp[i] = qcount[i]
       end
 
-      calculate_tpm!( quant, count_temp, sig=sig, readlen=readlen )
+      do_max = (it > 1)
+
+      # Process active multi-mapping classes and compact out newly converged ones
+      w = 0
+      @inbounds for j in 1:length(active_ambig)
+         eq = active_ambig[j]
+         if !maximize_and_assign!( eq, do_max )
+            w += 1
+            active_ambig[w] = eq
+         end
+      end
+      resize!(active_ambig, w)
+
+      # Process active isoform classes and compact out newly converged ones
+      w = 0
+      @inbounds for j in 1:length(active_classes)
+         eq = active_classes[j]
+         if !maximize_and_assign!( eq, do_max )
+            w += 1
+            active_classes[w] = eq
+         end
+      end
+      resize!(active_classes, w)
+
+      # Update TPM only for active isoforms and check convergence inline
+      rpk_sum = 0.0
+      @inbounds for k in 1:n_act_iso
+         i = active_iso[k]
+         v = @fastmath count_temp[i] * inv_eff_len[k]
+         count_temp[i] = v
+         rpk_sum += v
+      end
+      rpk_sum = max( rpk_sum, 1.0 )
+      scale = @fastmath SCALING_FACTOR / rpk_sum
+
+      changed = false
+      if sig > 0
+         @inbounds for k in 1:n_act_iso
+            i = active_iso[k]
+            v = count_temp[i]
+            new_tpm = v == 0.0 ? 0.0 : round( @fastmath(v * scale), digits=sig )
+            if new_tpm != tpm[i]
+               changed = true
+               tpm[i] = new_tpm
+            end
+         end
+      else
+         @inbounds for k in 1:n_act_iso
+            i = active_iso[k]
+            v = count_temp[i]
+            new_tpm = @fastmath v * scale
+            if new_tpm != tpm[i]
+               changed = true
+               tpm[i] = new_tpm
+            end
+         end
+      end
 
       it += 1
    end
@@ -850,7 +1041,7 @@ function gene_em!( quant::GraphLibQuant,
 end
 
 
-function output_tpm( file, lib::GraphLib, gquant::GraphLibQuant )
+function output_tpm( file, lib::SeqLibrary, gquant::GraphLibQuant )
 
    geneio = open( file * ".gene.tpm.gz", "w" )
    genestream = ZlibDeflateOutputStream( geneio )
@@ -858,22 +1049,27 @@ function output_tpm( file, lib::GraphLib, gquant::GraphLibQuant )
    isostream = ZlibDeflateOutputStream( isoio )
    output_tpm_header( genestream, "Gene" )
    output_tpm_header( isostream, "Isoform" )
-   for i in 1:length(lib.names)
+   @inbounds for i in 1:length(lib.names)
       idx = gquant.geneidx[i]
       genetpm = 0.0
       genecnt = 0.0
-      for j in 1:length(lib.graphs[i].annoname)
-         genetpm += gquant.tpm[j+idx]
-         genecnt += gquant.count[j+idx]
-         tab_write( isostream, lib.graphs[i].annoname[j] )
-         tab_write( isostream, string(gquant.tpm[j+idx]) )
-         tab_write( isostream, string(gquant.count[j+idx]) )
-         write( isostream, '\n' )
+      annonames = lib.graphs[i].annoname
+      for j in 1:length(annonames)
+         tval = gquant.tpm[j+idx]
+         cval = gquant.count[j+idx]
+         genetpm += tval
+         genecnt += cval
+         write( isostream, annonames[j], UInt8('\t') )
+         write_float( isostream, tval )
+         write( isostream, UInt8('\t') )
+         write_float( isostream, cval )
+         write( isostream, "\t\n" )
       end
-      tab_write( genestream, lib.names[i] )
-      tab_write( genestream, string(genetpm) )
-      write( genestream, string(genecnt) )
-      write( genestream, '\n' )
+      write( genestream, lib.names[i], UInt8('\t') )
+      write_float( genestream, genetpm )
+      write( genestream, UInt8('\t') )
+      write_float( genestream, genecnt )
+      write( genestream, UInt8('\n') )
    end
    close( isostream )
    close( isoio )

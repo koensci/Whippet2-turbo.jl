@@ -23,7 +23,7 @@ const INDEX_TO_EDGETYPE_NODE = transpose(reshape([[0x03  for _ in 1:4 ];
 
 
 function Base.convert( ::Type{EdgeType}, one::UInt8, two::UInt8 )
-   @assert( 5 <= one <= 7 && 5 <= one <= 7 )
+   @assert( 5 <= one <= 7 && 5 <= two <= 7 )
    EDGETYPE_TO_UINT8[one-3,two-3]
 end
 
@@ -248,15 +248,7 @@ function issubinterval( itree::T, subint::I ) where {T <: IntervalTree,
    false
 end
 
-# hacky extension of Base.get for tuples which isn't supported natively
-# because tuples aren't really a type of collection, fair enough
-function Base.get( collection::T, key::I, def ) where {T <: Tuple, I <: Integer}
-   if 1 <= key <= length(collection)
-      return collection[key]
-   else
-      return def
-   end
-end
+# Note: Base.get(::Tuple, ::Integer, default) is provided natively by Julia Base.
 
 # Functions for iso.jl annotated edges feature
 # Take a RefTx and produce an BitSet through the nodes of a SpliceGraph

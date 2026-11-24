@@ -18,6 +18,58 @@ struct GraphLib <: SeqLibrary
    version::VersionNumber
 end
 
+# Concretely-typed zero-copy in-memory wrappers for hot paths.
+# Preserves 100% serialization compatibility with existing .jls GraphLib files.
+struct FastSpliceGraph{K}
+   nodeoffset::Vector{CoordInt}
+   nodecoord::Vector{CoordInt}
+   nodelen::Vector{CoordInt}
+   edgetype::Vector{EdgeType}
+   edgeleft::Vector{SGKmer{K}}
+   edgeright::Vector{SGKmer{K}}
+   annopath::Vector{BitSet}
+   annoname::Vector{String}
+   annobias::Vector{ExpectedGC}
+   seq::LongSequence{DNAAlphabet{4}}
+end
+
+struct FastGraphLib{K, F <: FMIndex} <: SeqLibrary
+   offset::Vector{CoordInt}
+   names::Vector{GeneName}
+   info::Vector{GeneInfo}
+   lengths::Vector{Float64}
+   graphs::Vector{FastSpliceGraph{K}}
+   coords::IntervalCollection{SGNodeIsExon}
+   edges::Edges{K}
+   index::F
+   sorted::Bool
+   kmer::Int64
+   hasindex::Bool
+   version::VersionNumber
+end
+
+const AnySpliceGraph = Union{SpliceGraph, FastSpliceGraph}
+
+function FastGraphLib( lib::GraphLib )
+   K = Int(lib.kmer)
+   edges = lib.edges::Edges{K}
+   n = length(lib.graphs)
+   graphs = Vector{FastSpliceGraph{K}}(undef, n)
+   @inbounds for i in 1:n
+      g = lib.graphs[i]::SpliceGraph{K}
+      seq = g.seq isa LongSequence{DNAAlphabet{4}} ? g.seq : LongSequence{DNAAlphabet{4}}(g.seq)
+      graphs[i] = FastSpliceGraph{K}(g.nodeoffset, g.nodecoord, g.nodelen, g.edgetype,
+                                     g.edgeleft, g.edgeright, g.annopath, g.annoname,
+                                     g.annobias, seq)
+   end
+   return FastGraphLib{K, typeof(lib.index)}(
+      lib.offset, lib.names, lib.info, lib.lengths, graphs,
+      lib.coords, edges, lib.index, lib.sorted, lib.kmer, lib.hasindex, lib.version
+   )
+end
+
+FastGraphLib( lib::FastGraphLib ) = lib
+
 
 function checkversion( lib::GraphLib, currentver, minversion::VersionNumber )
    try

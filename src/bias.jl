@@ -92,10 +92,10 @@ count!( mod::DefaultBiasMod, x, y ) = DEFAULTCOUNTER_ONE
 Base.hash( v::UInt16 ) = convert(UInt64, v)
 
 function add_to_back!( back::Vector{Float64}, exp::ExpectedGC, weight::Float64 )
-   for i in 1:length(exp)
+   @inbounds for i in 1:length(exp)
       back[i] += exp[i] * weight
    end
-   mod
+   back
 end
 
 primer_normalize!( mod::DefaultBiasMod )   = 1.0
@@ -153,38 +153,170 @@ function primer_normalize!( mod::JointBiasMod )
    foresum = sum(mod.fore)
    backsum = sum(mod.back)
    @inbounds for i in 1:length(mod.fore)
-      @fastmath mod.fore[i] = mod.fore[i] / foresum
-      @fastmath mod.back[i] = mod.back[i] / backsum
+      if foresum > 0.0
+         @fastmath mod.fore[i] = mod.fore[i] / foresum
+      end
+      if backsum > 0.0
+         @fastmath mod.back[i] = mod.back[i] / backsum
+      end
    end
 end
 
-function primer_count!( mod::JointBiasMod, seq::BioSequence{A} ) where A <: BioSequences.Alphabet
-   # 5 prime bias
-   idx = 1
-   for i in mod.foreoffset:(mod.foreoffset+mod.forenpos-1)
-      hept = kmer_index_trailing(UInt16, seq[i:(i+mod.size-1)])
-      mod.fore[hept+1] += 1.0
-      mod.temp.primer[idx] = hept
-      idx += 1
+function primer_count!( mod::JointBiasMod, seq::LongSequence{DNAAlphabet{2}} )
+   k = mod.size
+   seqlen = length(seq)
+   mask = UInt16((1 << (2 * k)) - 1)
+   fore = mod.fore
+   back = mod.back
+   temp_primer = mod.temp.primer
+
+   # 5 prime foreground bias (rolling 2-bit k-mer)
+   foreoff = mod.foreoffset
+   foren = min(mod.forenpos, max(0, seqlen - foreoff - k + 2))
+   if foren > 0
+      hept = kmer_index_trailing_sub(UInt16, seq, foreoff, foreoff + k - 1)
+      @inbounds begin
+         fore[Int(hept) + 1] += 1.0
+         temp_primer[1] = hept
+         for idx in 2:foren
+            hept = ((hept << 2) | UInt16(raw_getindex(seq, foreoff + idx + k - 2))) & mask
+            fore[Int(hept) + 1] += 1.0
+            temp_primer[idx] = hept
+         end
+      end
    end
-   for i in mod.backoffset:(mod.backoffset+mod.backnpos-1)
-      mod.back[kmer_index_trailing(UInt16, seq[i:(i+mod.size-1)])+1] += 1.0
+
+   # background bias (rolling 2-bit k-mer)
+   backoff = mod.backoffset
+   backn = min(mod.backnpos, max(0, seqlen - backoff - k + 2))
+   if backn > 0
+      hept = kmer_index_trailing_sub(UInt16, seq, backoff, backoff + k - 1)
+      @inbounds begin
+         back[Int(hept) + 1] += 1.0
+         for idx in 2:backn
+            hept = ((hept << 2) | UInt16(raw_getindex(seq, backoff + idx + k - 2))) & mask
+            back[Int(hept) + 1] += 1.0
+         end
+      end
    end
 
    return mod.temp
 end
 
-function gc_count!( mod::JointBiasMod, seq::BioSequence{A} ) where A <: BioSequences.Alphabet
-   # GC fragment bias
+function primer_count!( mod::JointBiasMod, seq::BioSequence{A} ) where A <: BioSequences.Alphabet
+   # 5 prime bias
    idx = 1
-   for i in mod.gcoffset:mod.gcincrement:(length(seq)-mod.gcsize)
-      gc = gc_content(seq[i:(i+mod.gcsize-1)])
-      bin = Int(div( gc, mod.gcwidth )+1)
-      mod.gcfore[bin] += 1.0
-      mod.temp.gc[idx] = bin
+   k = mod.size
+   seqlen = length(seq)
+   fore = mod.fore
+   back = mod.back
+   temp_primer = mod.temp.primer
+   fore_stop = min(mod.foreoffset + mod.forenpos - 1, seqlen - k + 1)
+   @inbounds for i in mod.foreoffset:fore_stop
+      hept = kmer_index_trailing_sub(UInt16, seq, i, i + k - 1)
+      fore[Int(hept) + 1] += 1.0
+      temp_primer[idx] = hept
       idx += 1
    end
+   back_stop = min(mod.backoffset + mod.backnpos - 1, seqlen - k + 1)
+   @inbounds for i in mod.backoffset:back_stop
+      back[Int(kmer_index_trailing_sub(UInt16, seq, i, i + k - 1)) + 1] += 1.0
+   end
 
+   return mod.temp
+end
+
+@inline _is_gc_2bit( b::UInt8 ) = (b == 0x01) | (b == 0x02)
+
+@inline function _push_gc_temp!( temp_gc::Vector{Int32}, idx::Int, bin::Int )
+   if idx > length(temp_gc)
+      oldlen = length(temp_gc)
+      resize!(temp_gc, max(idx, oldlen * 2))
+      @inbounds for k in (oldlen + 1):length(temp_gc)
+         temp_gc[k] = zero(Int32)
+      end
+   end
+   @inbounds temp_gc[idx] = Int32(bin)
+   return idx + 1
+end
+
+function _gc_count!( mod::JointBiasMod, seq::LongSequence{DNAAlphabet{2}}, start_idx::Int )
+   # GC fragment bias (zero-allocation sliding window)
+   gcoff = mod.gcoffset
+   gcinc = mod.gcincrement
+   gcsize = mod.gcsize
+   gcwidth = mod.gcwidth
+   gcfore = mod.gcfore
+   temp_gc = mod.temp.gc
+   stop_i = length(seq) - gcsize
+   gcoff <= stop_i || return start_idx
+
+   inv_gcsize = Float64(gcsize)
+   idx = start_idx
+   if gcinc < gcsize
+      gc_cnt = 0
+      @inbounds for pos in gcoff:(gcoff + gcsize - 1)
+         gc_cnt += ifelse(_is_gc_2bit(raw_getindex(seq, pos)), 1, 0)
+      end
+      bin = Int(div(gc_cnt / inv_gcsize, gcwidth)) + 1
+      @inbounds gcfore[bin] += 1.0
+      idx = _push_gc_temp!(temp_gc, idx, bin)
+
+      i = gcoff + gcinc
+      @inbounds while i <= stop_i
+         old_start = i - gcinc
+         new_start = old_start + gcsize
+         for offset in 0:(gcinc - 1)
+            gc_cnt -= ifelse(_is_gc_2bit(raw_getindex(seq, old_start + offset)), 1, 0)
+            gc_cnt += ifelse(_is_gc_2bit(raw_getindex(seq, new_start + offset)), 1, 0)
+         end
+         bin = Int(div(gc_cnt / inv_gcsize, gcwidth)) + 1
+         gcfore[bin] += 1.0
+         idx = _push_gc_temp!(temp_gc, idx, bin)
+         i += gcinc
+      end
+   else
+      @inbounds for i in gcoff:gcinc:stop_i
+         gc_cnt = 0
+         for pos in i:(i + gcsize - 1)
+            gc_cnt += ifelse(_is_gc_2bit(raw_getindex(seq, pos)), 1, 0)
+         end
+         bin = Int(div(gc_cnt / inv_gcsize, gcwidth)) + 1
+         gcfore[bin] += 1.0
+         idx = _push_gc_temp!(temp_gc, idx, bin)
+      end
+   end
+
+   return idx
+end
+
+function _gc_count!( mod::JointBiasMod, seq::BioSequence{A}, start_idx::Int ) where A <: BioSequences.Alphabet
+   # GC fragment bias
+   idx = start_idx
+   gcsize = mod.gcsize
+   gcwidth = mod.gcwidth
+   gcfore = mod.gcfore
+   temp_gc = mod.temp.gc
+   inv_gcsize = Float64(gcsize)
+   @inbounds for i in mod.gcoffset:mod.gcincrement:(length(seq)-gcsize)
+      gc_cnt = 0
+      for pos in i:(i + gcsize - 1)
+         nt = seq[pos]
+         gc_cnt += ifelse(nt == DNA_G || nt == DNA_C, 1, 0)
+      end
+      bin = Int(div( gc_cnt / inv_gcsize, gcwidth )+1)
+      gcfore[bin] += 1.0
+      idx = _push_gc_temp!(temp_gc, idx, bin)
+   end
+
+   return idx
+end
+
+function gc_count!( mod::JointBiasMod, seq::BioSequence{A} ) where A <: BioSequences.Alphabet
+   end_idx = _gc_count!( mod, seq, 1 )
+   if end_idx <= length(mod.temp.gc)
+      @inbounds mod.temp.gc[end_idx] = zero(Int32)
+   end
    return mod.temp
 end
 
@@ -192,8 +324,10 @@ function count!( mod::JointBiasMod, seq::BioSequence{A} ) where A <: BioSequence
    # 5 prime bias
    primer_count!( mod, seq )
    # GC fragment bias
-   fill!(mod.temp.gc, zero(Int32))
-   gc_count!( mod, seq )
+   end_idx = _gc_count!( mod, seq, 1 )
+   if end_idx <= length(mod.temp.gc)
+      @inbounds mod.temp.gc[end_idx] = zero(Int32)
+   end
 
    return mod.temp
 end
@@ -201,16 +335,18 @@ end
 function count!( mod::JointBiasMod, fwd::BioSequence{A}, rev::BioSequence{A} ) where A <: BioSequences.Alphabet
    # 5 prime bias
    primer_count!( mod, fwd )
-   # GC fragment bias
-   fill!(mod.temp.gc, zero(Int32))
-   gc_count!( mod, fwd )
-   gc_count!( mod, rev )
+   # GC fragment bias (accumulate both mates into mod.temp.gc without overwriting fwd)
+   mid_idx = _gc_count!( mod, fwd, 1 )
+   end_idx = _gc_count!( mod, rev, mid_idx )
+   if end_idx <= length(mod.temp.gc)
+      @inbounds mod.temp.gc[end_idx] = zero(Int32)
+   end
 
    return mod.temp
 end
 
-@fastmath value!( mod::JointBiasMod, hept::UInt16 ) = mod.back[hept+1] / mod.fore[hept+1]
-@fastmath value!( mod::JointBiasMod, bin::Int ) = mod.fore[bin] > 0.0 ? mod.back[bin] / mod.fore[bin] : 1.0
+@fastmath value!( mod::JointBiasMod, hept::UInt16 ) = mod.fore[hept+1] > 0.0 ? mod.back[hept+1] / mod.fore[hept+1] : 1.0
+@fastmath value!( mod::JointBiasMod, bin::Int ) = (mod.gcfore[bin] > 0.0 && mod.gcback[bin] > 0.0) ? mod.gcback[bin] / mod.gcfore[bin] : 1.0
 
 
 mutable struct JointBiasCounter <: ReadCounter
@@ -267,11 +403,17 @@ end
 
 @inline function gc_adjust!( cnt::JointBiasCounter, mod::JointBiasMod )
    weight = 0.0
-   for i in 1:length(cnt.gc)
-      weight += value!( mod, i ) * cnt.gc[i]
+   gcsum = Int32(0)
+   gc = cnt.gc
+   @inbounds for i in 1:length(gc)
+      c = gc[i]
+      if c > 0
+         weight += value!( mod, i ) * c
+         gcsum += c
+      end
    end
-   if sum(cnt.gc) > 0
-      weight /= sum(cnt.gc)
+   if gcsum > 0
+      weight /= gcsum
       cnt.count *= weight
    end
    cnt

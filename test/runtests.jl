@@ -101,6 +101,38 @@ end
    egc = ExpectedGC( seq )
    @test length(egc) == 20
    @test egc[ Int(div(gc_content(seq), 0.05)+1) ] == 1.0
+
+   # Regression tests for GC bias lookup (gcfore/gcback) and paired-end GC bin accumulation
+   gcmod = JointBiasMod()
+   # Distinct GC contents: low-GC fwd (~20% GC -> bin 5) and high-GC rev (~80% GC -> bin 17)
+   fwd_seq = LongSequence{DNAAlphabet{2}}("AAAAG" ^ 20)
+   rev_seq = LongSequence{DNAAlphabet{2}}("GGGGCT" ^ 16 * "GGGG")
+   tmp = count!( gcmod, fwd_seq, rev_seq )
+   gccnt = JointBiasCounter()
+   push!( gccnt, tmp )
+   fwd_bin = Int(div(0.2, 0.05)) + 1
+   rev_bin = Int(div(gc_content(rev_seq[5:54]), 0.05)) + 1
+   @test gccnt.gc[fwd_bin] > 0
+   @test gccnt.gc[rev_bin] > 0
+   # Ensure value!(gcmod, bin::Int) reads gcback/gcfore rather than primer fore/back
+   gcmod.fore .= 1.0
+   gcmod.back .= 100.0
+   gcmod.gcfore .= 0.0
+   gcmod.gcback .= 0.0
+   gcmod.gcfore[fwd_bin] = 0.25
+   gcmod.gcback[fwd_bin] = 0.5
+   @test value!( gcmod, fwd_bin ) ≈ 2.0
+   @test value!( gcmod, rev_bin ) == 1.0
+   @test add_to_back!( gcmod.gcback, egc, 1.0 ) === gcmod.gcback
+
+   # Regression test for SRA FASTQ records with +SRR... line-3 text containing N/n bases
+   sra_fq = IOBuffer("@SRR8615273.1 1 length=10\nNCGTnCGTAN\n+SRR8615273.1 1 length=10\n#III#IIII#\n")
+   sra_reader = FASTQ.Reader( BufferedInputStream(sra_fq), fill_ambiguous=DNA_A )
+   sra_rec = FASTQRecord()
+   read!( sra_reader, sra_rec )
+   fill!( sra_rec, 33 )
+   @test sra_rec.sequence == LongSequence{DNAAlphabet{2}}("ACGTACGTAA")
+   @test sra_rec.quality == UInt8[2, 40, 40, 40, 2, 40, 40, 40, 40, 2]
 end
 
 @testset "Splice Graphs" begin
