@@ -239,6 +239,46 @@ end
    end
 end
 
+@inline function reset_align!( align::SGAlignment, offset::UInt32, offsetread::ReadLengthInt, ispos::Bool )
+   align.offset = offset
+   align.offsetread = offsetread
+   empty!( align.path )
+   align.strand = ispos
+   align.isvalid = false
+   align
+end
+
+@inline function _ungapped_align!( p::AlignParam, 
+                                   lib::SeqLibrary, 
+                                   read::FASTQRecord, 
+                                   indx::Int, 
+                                   readloc::Int,
+                                   align::SGAlignment;
+                                   ispos::Bool=true, 
+                                   geneind::GeneInt=convert(GeneInt,searchsortedlast( lib.offset, indx )) )
+
+   sgidx       = indx - Int(@inbounds lib.offset[geneind])
+   sg          = @inbounds lib.graphs[geneind]
+   offset_node = convert(NodeInt, searchsortedlast(sg.nodeoffset, convert(CoordInt, sgidx + 1)))
+
+   reset_align!( align, UInt32(sgidx + 1), convert(ReadLengthInt, readloc + 1), ispos )
+
+   # If the splice graph has no ambiguous bases and the entire exact FM-index seed
+   # stays inside offset_node, skip re-checking the (seed_length - 1) forward seed bases.
+   node_end  = Int(@inbounds sg.nodeoffset[offset_node]) + Int(@inbounds sg.nodelen[offset_node]) - 1
+   seed_skip = (!_sg_has_ambig(sg) && (sgidx + p.seed_length - 1 <= node_end) && (readloc + p.seed_length - 1 <= length(read.sequence))) ? (p.seed_length - 1) : 0
+
+   align = ungapped_fwd_extend( p, lib, geneind, sgidx + 1 + seed_skip,
+                                read, readloc + 1 + seed_skip, ispos=ispos,
+                                align=align, nodeidx=offset_node,
+                                init_mat=convert(MatchesInt, seed_skip) )
+
+   align = ungapped_rev_extend( p, lib, geneind, sgidx,
+                                read, readloc, ispos=ispos, align=align,
+                                nodeidx=offset_node )
+   align
+end
+
 @inline function _ungapped_align( p::AlignParam, 
                                   lib::SeqLibrary, 
                                   read::FASTQRecord, 
@@ -246,18 +286,8 @@ end
                                   readloc::Int;
                                   ispos::Bool=true, 
                                   geneind::GeneInt=convert(GeneInt,searchsortedlast( lib.offset, indx )) )
-
-   sgidx       = indx - Int(@inbounds lib.offset[geneind])
-   offset_node = convert(NodeInt,searchsortedlast((@inbounds lib.graphs[geneind].nodeoffset), convert(CoordInt, sgidx + 1)))
-
-   align = ungapped_fwd_extend( p, lib, geneind, sgidx + 1,
-                                read, readloc + 1, ispos=ispos,
-                                nodeidx=offset_node )
-
-   align = ungapped_rev_extend( p, lib, geneind, sgidx,
-                                read, readloc, ispos=ispos, align=align,
-                                nodeidx=offset_node )
-   align
+   align = SGAlignment(zero(UInt32), zero(ReadLengthInt), SGAlignNode[], ispos, false)
+   _ungapped_align!( p, lib, read, indx, readloc, align; ispos=ispos, geneind=geneind )
 end
 
 @inline function ungapped_align( p::AlignParam, 
@@ -412,7 +442,8 @@ end
                                         ridx::Int; 
                                         ispos::Bool=true,
                                         align::SGAlignment=SGAlignment(sgidx, ridx, SGAlignNode[],ispos,false),
-                                        nodeidx::NodeInt=convert(NodeInt,searchsortedlast(lib.graphs[geneind].nodeoffset,CoordInt(sgidx))) )
+                                        nodeidx::NodeInt=convert(NodeInt,searchsortedlast(lib.graphs[geneind].nodeoffset,CoordInt(sgidx))),
+                                        init_mat::MatchesInt=zero(MatchesInt) )
    sg          = lib.graphs[geneind]
    rseq        = read.sequence
    rqual       = read.quality
@@ -428,9 +459,9 @@ end
    passed_edges::Union{Nothing, Vector{UInt8}} = nothing
    mistol      = mistolerance(align)
 
-   push!( align.path, SGAlignNode( geneind, nodeidx, zero(SGAlignScore) ) ) # starting node
+   push!( align.path, SGAlignNode( geneind, nodeidx, SGAlignScore(init_mat, zero(MismatchInt), zero(MismatchFloat)) ) ) # starting node
    cur_node    = nodeidx
-   cur_mat     = zero(MatchesInt)
+   cur_mat     = init_mat
    cur_mis     = zero(MismatchInt)
    cur_mistol  = zero(MismatchFloat)
    need_flush  = true

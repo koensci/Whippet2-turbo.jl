@@ -568,10 +568,13 @@ function Base.push!( ambig::MultiMapping{SGAlignSingle,R},
    @inbounds for i in 1:length(alns)
       cont[i] = SGAlignSingle( alns[i].path )
    end
-   mc = get( ambig.map, cont, nothing )
-   if mc !== nothing
-      push!( mc.raw, value )
+   ht_idx = Base.ht_keyindex( ambig.map, cont )
+   if ht_idx > 0
+      @inbounds push!( ambig.map.vals[ht_idx].raw, value )
    else
+      @inbounds for i in 1:length(cont)
+         cont[i] = SGAlignSingle( copy(alns[i].path) )
+      end
       mc = MultiCompat{R}( graphq, lib, cont, ambig.iset )
       push!( mc.raw, value )
       ambig.map[cont] = mc
@@ -588,10 +591,13 @@ function Base.push!( ambig::MultiMapping{SGAlignPaired,R},
    @inbounds for i in 1:length(fwd)
       cont[i] = SGAlignPaired( fwd[i].path, rev[i].path )
    end
-   mc = get( ambig.map, cont, nothing )
-   if mc !== nothing
-      push!( mc.raw, value )
+   ht_idx = Base.ht_keyindex( ambig.map, cont )
+   if ht_idx > 0
+      @inbounds push!( ambig.map.vals[ht_idx].raw, value )
    else
+      @inbounds for i in 1:length(cont)
+         cont[i] = SGAlignPaired( copy(fwd[i].path), copy(rev[i].path) )
+      end
       mc = MultiCompat{R}( graphq, lib, cont, ambig.iset )
       push!( mc.raw, value )
       ambig.map[cont] = mc
@@ -725,12 +731,13 @@ function count!( graphq::GraphLibQuant{C,R},
          countedge!( sgquant, path[1], path[2], value )
       else # or we have long path, add long count
          curkey = C(path)
-         if haskey(sgquant.long, curkey)
-            push!( sgquant.long[curkey], value )
+         ht_idx = Base.ht_keyindex( sgquant.long, curkey )
+         if ht_idx > 0
+            @inbounds push!( sgquant.long.vals[ht_idx], value )
          else
             entry = zero(R)
             push!( entry, value )
-            sgquant.long[curkey] = entry
+            sgquant.long[C(copy(path))] = entry
          end
       end
    end
@@ -775,12 +782,13 @@ function count!( graphq::GraphLibQuant{C,R},
    else
        # or we have two paths, add long count
        curkey = SGAlignPaired(fwd, rev)
-       if haskey(sgquant.long, curkey)
-          push!( sgquant.long[curkey], value )
+       ht_idx = Base.ht_keyindex( sgquant.long, curkey )
+       if ht_idx > 0
+          @inbounds push!( sgquant.long.vals[ht_idx], value )
        else
           entry = zero(R)
           push!( entry, value )
-          sgquant.long[curkey] = entry
+          sgquant.long[SGAlignPaired(copy(fwd), copy(rev))] = entry
        end
    end
 end

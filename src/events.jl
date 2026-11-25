@@ -834,6 +834,15 @@ function _process_spliced( sg::AnySpliceGraph,
    psi,inc_graph,exc_graph,ambig_cnt,total_reads
 end
 
+struct _NoCloseIOBuffer <: IO
+   io::IOBuffer
+end
+Base.write(w::_NoCloseIOBuffer, x::UInt8) = write(w.io, x)
+Base.unsafe_write(w::_NoCloseIOBuffer, p::Ptr{UInt8}, n::UInt) = unsafe_write(w.io, p, n)
+Base.flush(w::_NoCloseIOBuffer) = flush(w.io)
+Base.isopen(w::_NoCloseIOBuffer) = isopen(w.io)
+Base.close(w::_NoCloseIOBuffer) = nothing
+
 function process_events( outfile, 
                          lib::SeqLibrary, 
                          graphq::GraphLibQuant; 
@@ -842,16 +851,61 @@ function process_events( outfile,
 
    fast_lib = FastGraphLib(lib)
    io = open( outfile, "w" )
-   stream = ZlibDeflateOutputStream( io )
-   output_psi_header( stream )
-   @inbounds for g in 1:length(fast_lib.graphs)
-      name = fast_lib.names[g]
-      chr  = fast_lib.info[g].name
-      strand = fast_lib.info[g].strand ? '+' : '-'
-      _process_events( stream, fast_lib.graphs[g], graphq.quant[g], (name,chr,strand),
-                       iscircok=iscircok, readlen=readlen )
+   ngenes = length(fast_lib.graphs)
+   nthreads = Threads.nthreads()
+   if nthreads <= 1 || ngenes < 256
+      stream = ZlibDeflateOutputStream( io )
+      output_psi_header( stream )
+      @inbounds for g in 1:ngenes
+         name = fast_lib.names[g]
+         chr  = fast_lib.info[g].name
+         strand = fast_lib.info[g].strand ? '+' : '-'
+         _process_events( stream, fast_lib.graphs[g], graphq.quant[g], (name,chr,strand),
+                          iscircok=iscircok, readlen=readlen )
+      end
+      close(stream)
+   else
+      # Write header as first gzip member, then format + gzip-compress gene blocks in parallel
+      # (RFC 1952 concatenated gzip members) and write them in exact gene order.
+      hiob = IOBuffer()
+      hstream = ZlibDeflateOutputStream( _NoCloseIOBuffer(hiob) )
+      output_psi_header( hstream )
+      close(hstream)
+      write( io, take!(hiob) )
+
+      block_sz = clamp(cld(ngenes, nthreads * 4), 64, 1024)
+      nblocks = cld(ngenes, block_sz)
+      wave_sz = min(nblocks, nthreads * 2)
+      tasks = Vector{Task}(undef, wave_sz)
+      b_start = 1
+      while b_start <= nblocks
+         b_end = min(b_start + wave_sz - 1, nblocks)
+         nb = b_end - b_start + 1
+         for k in 1:nb
+            b = b_start + k - 1
+            lo = (b - 1) * block_sz + 1
+            hi = min(b * block_sz, ngenes)
+            tasks[k] = Threads.@spawn begin
+               ciob = IOBuffer()
+               zstream = ZlibDeflateOutputStream( _NoCloseIOBuffer(ciob), bufsize=65536 )
+               @inbounds for g in lo:hi
+                  name = fast_lib.names[g]
+                  chr  = fast_lib.info[g].name
+                  strand = fast_lib.info[g].strand ? '+' : '-'
+                  _process_events( zstream, fast_lib.graphs[g], graphq.quant[g], (name,chr,strand),
+                                   iscircok=iscircok, readlen=readlen )
+               end
+               close(zstream)
+               take!(ciob)
+            end
+         end
+         for k in 1:nb
+            bytes = fetch(tasks[k])::Vector{UInt8}
+            isempty(bytes) || write( io, bytes )
+         end
+         b_start = b_end + 1
+      end
    end
-   close(stream)
    close(io)
 end
 

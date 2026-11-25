@@ -18,6 +18,32 @@ struct GraphLib <: SeqLibrary
    version::VersionNumber
 end
 
+function _has_ambig_dna4( seq::LongSequence{DNAAlphabet{4}} )
+   len = length(seq)
+   len == 0 && return false
+   if first(seq.part) == 1
+      nfull = len >>> 4
+      data = seq.data
+      @inbounds for w_idx in 1:nfull
+         w = data[w_idx]
+         a = w & 0x1111111111111111
+         b = (w >> 1) & 0x1111111111111111
+         c = (w >> 2) & 0x1111111111111111
+         d = (w >> 3) & 0x1111111111111111
+         (a + b + c + d) != 0x1111111111111111 && return true
+      end
+      @inbounds for i in ((nfull << 4) + 1):len
+         isambiguous(seq[i]) && return true
+      end
+      return false
+   else
+      @inbounds for i in 1:len
+         isambiguous(seq[i]) && return true
+      end
+      return false
+   end
+end
+
 # Concretely-typed zero-copy in-memory wrappers for hot paths.
 # Preserves 100% serialization compatibility with existing .jls GraphLib files.
 struct FastSpliceGraph{K}
@@ -31,7 +57,11 @@ struct FastSpliceGraph{K}
    annoname::Vector{String}
    annobias::Vector{ExpectedGC}
    seq::LongSequence{DNAAlphabet{4}}
+   has_ambig::Bool
 end
+
+@inline _sg_has_ambig( sg::FastSpliceGraph ) = sg.has_ambig
+@inline _sg_has_ambig( sg::SpliceGraph ) = true
 
 struct FastGraphLib{K, F <: FMIndex} <: SeqLibrary
    offset::Vector{CoordInt}
@@ -60,7 +90,7 @@ function FastGraphLib( lib::GraphLib )
       seq = g.seq isa LongSequence{DNAAlphabet{4}} ? g.seq : LongSequence{DNAAlphabet{4}}(g.seq)
       graphs[i] = FastSpliceGraph{K}(g.nodeoffset, g.nodecoord, g.nodelen, g.edgetype,
                                      g.edgeleft, g.edgeright, g.annopath, g.annoname,
-                                     g.annobias, seq)
+                                     g.annobias, seq, _has_ambig_dna4(seq))
    end
    return FastGraphLib{K, typeof(lib.index)}(
       lib.offset, lib.names, lib.info, lib.lengths, graphs,

@@ -26,17 +26,22 @@ function _push!(t::IntervalTrees.LeafNode{K, V, B}, key::AbstractInterval{K}, va
 end
 
 function pushzero!( collection::Dict{K,V}, key::K, value ) where {K, V}
-   if !haskey( collection, key )
-      collection[key] = zero(V)
+   ht_idx = Base.ht_keyindex( collection, key )
+   if ht_idx > 0
+      @inbounds push!( collection.vals[ht_idx], value )
+   else
+      v = zero(V)
+      push!( v, value )
+      collection[key] = v
    end
-   push!( collection[key], value )
 end
 
 function pushzero!( collection::IntervalMap{K,V}, key, value ) where {K <: NodeNum, V}
-   if !haskey( collection, (key.first,key.last) )
-      collection[key] = zero(V)
+   if !pushto!( collection, key, value )
+      v = zero(V)
+      push!( v, value )
+      collection[key] = v
    end
-   pushto!( collection, key, value )
 end
 
 function Base.get( cnt::R ) where R <: ReadCounter
@@ -383,10 +388,12 @@ function Base.push!( cnt::JointBiasCounter, bin::Int32 )
 end
 
 function Base.push!( cnt::JointBiasCounter, hept::UInt16 )
-   if haskey( cnt.map, hept )
-      cnt.map[hept] += 1
+   d = cnt.map
+   ht_idx = Base.ht_keyindex( d, hept )
+   if ht_idx > 0
+      @inbounds d.vals[ht_idx] += Int32(1)
    else
-      cnt.map[hept] = 1
+      d[hept] = Int32(1)
    end
    cnt
 end

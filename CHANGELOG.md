@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.0.0-fork.2
+
+Second wave of `whippet-quant` performance optimizations (developed using Gemini 4 Neon). Maintains **100% `.jls` index compatibility** and **byte-for-byte identical uncompressed outputs** with `v2.0.0-fork.1`.
+
+### Performance Improvements (`whippet-quant`)
+* **3-stage pipelined paired-end execution (`src/reads.jl`):** Added `PairedChunkBuf` with 3 disjoint ring buffers overlapping Stage 1 (concurrent `R1`/`R2` FASTQ reading), Stage 2 (parallel alignment across workers), and Stage 3 (strictly sequential deterministic counting, bias updates, and optional SAM output).
+* **Reusable `SGAlignment` pools & copy-on-insert (`src/align.jl`, `src/paired.jl`, `src/quant.jl`, `src/bias.jl`):**
+  * Added `reset_align!`, `_ungapped_align!`, and `ungapped_align_into!` so both single-threaded (`-t 1`) and multi-threaded paired-end alignment reuse pre-allocated `SGAlignment` slots without per-pair heap allocations on uniquely seeded non-branching pairs.
+  * Updated `count!` (`sgquant.long`), `Base.push!(::MultiMapping, ...)` (`ambig.map`), and `pushzero!` (`src/bias.jl`) to use single-lookup `Base.ht_keyindex` / `pushto!` with copy-on-insert for new alignment paths.
+* **Exact FM-index seed re-check skip (`src/index.jl`, `src/align.jl`):** Added SWAR ambiguity detection (`_has_ambig_dna4`) and a `has_ambig::Bool` flag on the in-memory `FastSpliceGraph` wrapper; when a gene has no ambiguous bases and the seed fits inside `offset_node`, `ungapped_fwd_extend` skips re-checking the exact `seed_length - 1` forward seed bases.
+* **Accelerated gzip FASTQ decompression (`src/reads.jl`):** Auto-detects `igzip` (falling back to `pigz`, then `Libz.ZlibInflateInputStream` with a 256 KB buffer) on Unix via a direct POSIX `popen`/`fread` stream (`_PopenReadStream`) + 256 KB `BufferedInputStream`, avoiding Julia libuv `iolock` contention across threads.
+* **Parallel `process_events` with concurrent gzip compression (`src/events.jl`):** Partitions genes into ordered blocks, formats and compresses each block concurrently into RFC 1952 concatenated gzip members (`_NoCloseIOBuffer` + `ZlibDeflateOutputStream`), and writes blocks in exact gene order (100% compatible with `gzip`/`gzcat` and `whippet-delta.jl`).
+
+---
+
 ## v2.0.0-fork.1
 
 Fork of the `whippet2-julia19-dev` branch of [`timbitz/Whippet.jl`](https://github.com/timbitz/Whippet.jl) (`whippet2` branch). Changes in this release were developed using Gemini 4 Neon.
