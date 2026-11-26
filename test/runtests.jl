@@ -772,6 +772,40 @@ IIIIIIIIIIII
             @test spl[7] == conf_vals[i]
             i += 1
          end
+
+         # Verify TS tandem-start path-to-node ordering (node n must match path starting at n)
+         ts_sg = SpliceGraph{2}(
+            CoordInt[1, 101, 201],
+            CoordInt[100, 200, 300],
+            CoordInt[100, 100, 100],
+            EdgeType[EDGETYPE_SL, EDGETYPE_SL, EDGETYPE_SL, EDGETYPE_RS],
+            DNAMer{2}[DNAMer("AA") for _ in 1:4],
+            DNAMer{2}[DNAMer("AA") for _ in 1:4],
+            BitSet[BitSet([1, 2, 3]), BitSet([2, 3]), BitSet([3])],
+            String["tx1", "tx2", "tx3"],
+            ExpectedGC[zeros(Float16, 21) for _ in 1:3],
+            LongSequence{DNAAlphabet{4}}("A"^300),
+         )
+         ts_quant = SpliceGraphQuant{SGAlignSingle, DefaultCounter}(ts_sg)
+         ts_quant.leng .= 100.0
+         # All reads only in downstream node 3 => downstream TSS (node 3) must get PSI = 1.0,
+         # upstream TSS (node 1) must get PSI = 0.0, and each row's Inc_Paths must start at its node!
+         ts_quant.node[3] = DefaultCounter(50.0)
+         ts_psi, ts_utr, ts_ambig, ts_len = process_tandem_utr(ts_sg, ts_quant, NodeInt(1), TXST_MOTIF, 50)
+         @test !isnull(ts_psi)
+         ts_buf = IOBuffer(read=true, write=true)
+         ts_bs = BufferedOutputStream(ts_buf)
+         output_utr(ts_bs, map(x -> round(x, digits=4), get(ts_psi)), ts_utr, sum(ts_utr) + sum(ts_ambig), "TS", ts_sg, 1, ("TS_GENE", "chr1", '+'))
+         flush(ts_bs)
+         seek(ts_buf, 0)
+         ts_lines = collect(eachline(ts_buf))
+         @test length(ts_lines) == 3
+         row1 = split(ts_lines[1], '\t')
+         row2 = split(ts_lines[2], '\t')
+         row3 = split(ts_lines[3], '\t')
+         @test row1[2] == "1" && parse(Float64, row1[6]) == 0.0 && startswith(row1[12], "1-2-3:")
+         @test row2[2] == "2" && parse(Float64, row2[6]) == 0.0 && startswith(row2[12], "2-3:")
+         @test row3[2] == "3" && parse(Float64, row3[6]) == 1.0 && startswith(row3[12], "3:")
       end
 
       @testset "Diff and Delta" begin

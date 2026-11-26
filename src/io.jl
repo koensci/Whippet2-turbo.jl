@@ -419,17 +419,21 @@ function output_utr( io::BufOut,
          i += 1
          continue
       end
-      write_float( io, psi[i] )
+      # For TS (tandem start), build_utr_graph pops from end_n down to start_n,
+      # so pgraph.nodes[1] is the downstream-most TSS (en) and pgraph.nodes[end]
+      # is the upstream-most TSS (st). Map ascending node n in st:en to its matching path.
+      idx = motif == "TS" ? (length(psi) - i + 1) : i
+      write_float( io, psi[idx] )
       write( io, UInt8('\t') )
       if !isnull( pgraph )
-         conf_int  = beta_posterior_ci( psi[i], total_reads, sig=3 )
+         conf_int  = beta_posterior_ci( psi[idx], total_reads, sig=3 )
          conf_int_write( io, conf_int, tab=true, width=true)
          write_float( io, round(total_reads, digits=3) )
          write( io, UInt8('\t') )
          complex_write( io, complexity( pgraph.value ), tab=true )
          write_float( io, round( shannon_index( pgraph.value ), digits=4 ) )
          write( io, UInt8('\t') )
-         count_write( io, get(pgraph).nodes[i], get(pgraph).psi[i], tab=true )
+         count_write( io, get(pgraph).nodes[idx], get(pgraph).psi[idx], tab=true )
          write( io, "NA\t" )
       else
          write( io, "NA\tNA\tNA\tNA\tNA\tNA\tNA\t\t" )

@@ -21,7 +21,7 @@
   * Drop-in compatible with classic `-a`/`-b` invocations (and includes `--legacy` to reproduce the original Monte Carlo Beta method).
 * **Critical Bug Fixes over upstream `whippet2-julia19-dev`:**
   * Fixed `--biascorrect` GC bias lookup indexing primer arrays (`fore`/`back`) instead of `gcfore`/`gcback`, and fixed paired-end `gc_count!` overwriting mate 1's GC bins.
-  * Fixed internal tandem-start (`TS`) node indexing in `output_utr` and `next_istandem` bounds.
+  * Fixed internal tandem-start (`TS`) node indexing in `output_utr` and `next_istandem` bounds, plus fixed upstream `TS` path-to-node PSI reversal in `output_utr` (where `build_utr_graph` popped `TS` nodes from `end_n` down to `start_n` while `output_utr` emitted rows ascending `st:en`).
   * Fixed SRA FASTQ `'N'` encoding failures (`Cannot encode 78`, [upstream #135](https://github.com/timbitz/Whippet.jl/issues/135)) — raw SRA FASTQ files with `+SRR...` line-3 headers run directly without preprocessing.
   * Guarded short reads (<37 nt) in `--biascorrect`, guarded zero-weight `NaN`s in `assign_ambig!`, fixed supplementary mate-2 SAM flags, and removed hardcoded 500-isoform EM buffer limits.
 

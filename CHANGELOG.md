@@ -4,6 +4,9 @@
 
 Upgraded `whippet-delta.jl` with a multithreaded Beta-Binomial GLM differential splicing engine supporting covariates, Empirical Bayes dispersion shrinkage, and Benjamini–Hochberg FDR (developed using Gemini 4 Neon). Requires zero new Julia dependencies and maintains full `.jls` index and `.psi.gz` compatibility with `v2.0.0-fork.1` and `v2.0.0-fork.2`.
 
+### Bug Fixes
+* **Tandem-start (`TS`) path-to-node PSI reversal (`src/io.jl`):** Fixed an upstream bug in `output_utr` where `build_utr_graph` popped `TXST_MOTIF` (`TS`) nodes in descending order (`end_n` down to `start_n`) while `output_utr` iterated `n in st:en` with ascending index `i`, swapping upstream and downstream `TS` PSI/CI/`Inc_Paths` rows. Added a 3-node `TS` unit test in `test/runtests.jl` (all 601,423 assertions pass).
+
 ### Differential Splicing Improvements (`whippet-delta`)
 * **Beta-Binomial GLM with Cox–Reid Empirical Bayes shrinkage (`src/diff_glm.jl`, `src/Whippet.jl`):**
   * Continuous Beta-Binomial log-likelihood handling fractional read counts (`k = Psi * Total_Reads`) with damped Fisher scoring (IRLS) and light ridge stabilization for complete separation (`0.0` vs `1.0` PSI).
