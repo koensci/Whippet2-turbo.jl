@@ -23,10 +23,14 @@ function parse_cmd()
    @add_arg_table! s begin
       "filename.fastq[.gz]--OR--pre-aligned.bam"
          arg_type = String
-         required = true
+         required = false
       "paired_mate.fastq[.gz]"
          arg_type = String
          required = false
+      "--batch"
+         help     = "Batch manifest CSV/TSV (sample,r1,r2,out_prefix or sample,r1,out_prefix); loads index once across all samples"
+         arg_type = String
+         default  = ""
       "--index", "-x"
          help     = "Output prefix for saving index 'dir/prefix' (default Whippet/index/graph[.jls])"
          arg_type = String
@@ -117,29 +121,68 @@ function parse_cmd()
    return parse_args(s)
 end
 
-function main()
+function _resolve_batch_input(raw::AbstractString, manifest_dir::AbstractString)
+   raw_s = String(raw)
+   p = fixpath(raw_s)
+   isfile(p) && return p
+   if !isabspath(raw_s)
+      alt = fixpath(joinpath(manifest_dir, raw_s))
+      isfile(alt) && return alt
+   end
+   return p
+end
 
-   args = parse_cmd()
+function parse_batch_manifest(manifest_path::AbstractString)
+   mpath = fixpath(String(manifest_path))
+   isfile(mpath) || error("Batch manifest file not found: $mpath")
+   mdir = dirname(abspath(mpath))
+   entries = Tuple{String,String,Union{Nothing,String},String}[]
+   delim = nothing
+   saw_first = false
 
-   println(stderr, " $( round( (time_ns()-start)/1e9, digits=6 ) ) seconds." )
+   open(mpath, "r") do io
+      for (line_no, raw_line) in enumerate(eachline(io))
+         line = strip(raw_line)
+         if isempty(line) || startswith(line, '#')
+            continue
+         end
+         if delim === nothing
+            delim = occursin('\t', line) ? '\t' : ','
+         end
+         cols = [String(strip(c)) for c in split(line, delim)]
+         if !saw_first
+            saw_first = true
+            if lowercase(cols[1]) in ("sample", "sample_id")
+               continue
+            end
+         end
+         if length(cols) < 3
+            error("Manifest line $line_no needs at least 3 columns (sample,r1,out_prefix or sample,r1,r2,out_prefix): $line")
+         end
+         sname = cols[1]
+         r1 = _resolve_batch_input(cols[2], mdir)
+         if length(cols) >= 4
+            r2_raw = cols[3]
+            r2 = (isempty(r2_raw) || r2_raw == "-" || uppercase(r2_raw) == "NA") ? nothing : _resolve_batch_input(r2_raw, mdir)
+            out_pref = fixpath(cols[4])
+         else
+            r2 = nothing
+            out_pref = fixpath(cols[3])
+         end
+         push!(entries, (sname, r1, r2, out_pref))
+      end
+   end
+   isempty(entries) && error("Batch manifest contains no sample rows: $mpath")
+   return entries
+end
 
-   indexpath = fixpath( args["index"] )
-   indexname = hasextension(indexpath, ".jls") ? indexpath : indexpath * ".jls"
-   println(stderr, "Loading splice graph index... $indexname")
-   @timer lib = open(deserialize, indexname)
-   checkversion( lib, ver, minversion )
-   lib = FastGraphLib( lib )
-
-   inputfile  = fixpath( args["filename.fastq[.gz]--OR--pre-aligned.bam"] )
+function quantify_one_sample( lib, args, indexpath::String, inputfile::String, matefile::Union{Nothing,String}, outprefix::String )
    isbaminput = hasextension(inputfile, ".bam")
 
    if isbaminput
       ispaired = ispaired_bamfile(inputfile)
    else
-      ispaired = args["paired_mate.fastq[.gz]"] != nothing
-      if ispaired
-         args["paired_mate.fastq[.gz]"] = fixpath(args["paired_mate.fastq[.gz]"])
-      end
+      ispaired = matefile !== nothing
    end
 
    ContainerType = ispaired ? SGAlignPaired : SGAlignSingle
@@ -159,10 +202,14 @@ function main()
 
    enc_offset = args["phred-64"] ? 64 : 33
 
+   outdir = dirname(abspath(outprefix))
+   isdir(outdir) || mkpath(outdir)
+
    println(stderr, "Processing reads from file...")
    if Threads.nthreads() > 1
       println(stderr, "Using $(Threads.nthreads()) threads for read alignment...")
    end
+   mate_parser = nothing
    if isbaminput
       parser = ispaired ? make_collated_parser( inputfile ) : make_single_parser( inputfile )
       println(stderr, "BAM: " * inputfile)
@@ -185,12 +232,9 @@ function main()
       parser = make_fqparser( inputfile, forcegzip=args["force-gz"] )
 
       if ispaired
-         mate_parser = make_fqparser( args["paired_mate.fastq[.gz]"], forcegzip=args["force-gz"] )
-      end
-
-       if ispaired
+         mate_parser = make_fqparser( matefile, forcegzip=args["force-gz"] )
          println(stderr, "FASTQ_1: " * inputfile)
-         println(stderr, "FASTQ_2: " * args["paired_mate.fastq[.gz]"])
+         println(stderr, "FASTQ_2: " * matefile)
          @timer mapped,totreads,readlen = process_paired_reads!( parser, mate_parser, param, lib, quant, multi, mod,
                                                            sam=args["sam"], qualoffset=enc_offset )
          readlen = Int(floor(readlen))
@@ -204,6 +248,7 @@ function main()
       end
    end
    close(parser)
+   mate_parser !== nothing && close(mate_parser)
 
    # TPM_EM
    println(stderr, "Calculating expression values and MLE of equivalence classes with EM:")
@@ -221,9 +266,9 @@ function main()
    gc_adjust!( quant, mod )
    gc_adjust!( multi, mod )
 
-   output_tpm( args["out"], lib, quant )
-   output_stats( args["out"] * ".map.gz", lib, quant, param, indexpath, totreads, mapped, Int(round(total_multi(multi))), readlen, ver )
-   output_junctions( args["out"] * ".jnc.gz", lib, quant )
+   output_tpm( outprefix, lib, quant )
+   output_stats( outprefix * ".map.gz", lib, quant, param, indexpath, totreads, mapped, Int(round(total_multi(multi))), readlen, ver )
+   output_junctions( outprefix * ".jnc.gz", lib, quant )
 
    println(stderr, "Assigning multi-mapping reads based on maximum likelihood estimate..")
    # Now assign multi to edges.
@@ -231,8 +276,54 @@ function main()
 
    effective_lengths!( lib, quant, 1, 0)
    println(stderr, "Calculating maximum likelihood estimate of events..." )
-   @timer process_events( args["out"] * ".psi.gz" , lib, quant, iscircok=args["circ"], readlen=readlen )
-   println(stderr, "Whippet $ver done." )
+   @timer process_events( outprefix * ".psi.gz" , lib, quant, iscircok=args["circ"], readlen=readlen )
+end
+
+function main()
+
+   args = parse_cmd()
+
+   println(stderr, " $( round( (time_ns()-start)/1e9, digits=6 ) ) seconds." )
+
+   batch_file = strip(args["batch"])
+   has_batch  = !isempty(batch_file)
+   has_input  = args["filename.fastq[.gz]--OR--pre-aligned.bam"] !== nothing
+
+   if has_batch && has_input
+      error("Specify either positional input FASTQ/BAM OR --batch <manifest.csv>, not both.")
+   elseif !has_batch && !has_input
+      error("Must provide an input FASTQ/BAM file or --batch <manifest.csv>.")
+   end
+   if has_batch && args["sam"]
+      error("--sam cannot be combined with --batch (stdout streams would interleave across samples).")
+   end
+
+   indexpath = fixpath( args["index"] )
+   indexname = hasextension(indexpath, ".jls") ? indexpath : indexpath * ".jls"
+   println(stderr, "Loading splice graph index... $indexname")
+   @timer lib = open(deserialize, indexname)
+   checkversion( lib, ver, minversion )
+   lib = FastGraphLib( lib )
+
+   if has_batch
+      entries = parse_batch_manifest(batch_file)
+      nsamp = length(entries)
+      println(stderr, "Batch mode: quantifying $nsamp sample(s) from $batch_file (index loaded once)...")
+      for (si, (sname, r1, r2, out_pref)) in enumerate(entries)
+         println(stderr, "\n=== [$si/$nsamp] Sample: $sname -> $out_pref ===")
+         quantify_one_sample( lib, args, indexpath, r1, r2, out_pref )
+         if si < nsamp
+            GC.gc()
+         end
+      end
+      println(stderr, "\nWhippet $ver batch done ($nsamp samples)." )
+   else
+      inputfile = fixpath( args["filename.fastq[.gz]--OR--pre-aligned.bam"] )
+      matefile  = args["paired_mate.fastq[.gz]"] === nothing ? nothing : fixpath(args["paired_mate.fastq[.gz]"])
+      outprefix = fixpath( args["out"] )
+      quantify_one_sample( lib, args, indexpath, inputfile, matefile, outprefix )
+      println(stderr, "Whippet $ver done." )
+   end
 end
 
 @timer main()

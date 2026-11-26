@@ -923,6 +923,47 @@ IIIIIIIIIIII
          run(`$(Base.julia_cmd()) --project=.. ../bin/whippet-delta.jl -a $(join(psi_files[4:6], ',')) -b $(join(psi_files[1:3], ',')) --legacy -o $(joinpath(tmpdir, "cli_leg"))`)
          @test isfile(joinpath(tmpdir, "cli_leg.diff.gz"))
          rm(tmpdir, recursive=true, force=true)
+
+         # 9. Constitutive-event exclusion & Spliced vs Tandem UTR (TS/TE) stratified EB prior
+         rng_eb = MersenneTwister(3766)
+         synth_evs = GLMEventData[]
+         # 280 constitutive events (Psi = 0.0 or 1.0 across all 6 samples) — must be excluded from EB prior
+         for ci in 1:280
+            pconst = isodd(ci) ? 1.0 : 0.0
+            etype = ci <= 140 ? "CE" : "TE"
+            push!(synth_evs, GLMEventData("C$(ci)", "1", "chr1:1-10", "+", etype,
+                                          1, 0.0, [1,2,3,4,5,6], fill(pconst, 6), fill(100.0, 6),
+                                          3, 3, 100.0, 100.0))
+         end
+         # 35 polymorphic spliced CE events with low dispersion (phi_true ≈ 0.015 => M ≈ 65)
+         for si in 1:35
+            ps = [clamp(rand(rng_eb, Beta(32.5, 32.5)), 0.01, 0.99) for _ in 1:6]
+            ks = [rand(rng_eb, Binomial(100, p)) / 100.0 for p in ps]
+            push!(synth_evs, GLMEventData("SP$(si)", "2", "chr1:20-50", "+", "CE",
+                                          1, 0.9, [1,2,3,4,5,6], ks, fill(100.0, 6),
+                                          3, 3, 100.0, 100.0))
+         end
+         # 35 polymorphic tandem UTR TE events with high dispersion (phi_true ≈ 0.15 => M ≈ 5.67)
+         for ui in 1:35
+            ps = [clamp(rand(rng_eb, Beta(2.83, 2.83)), 0.01, 0.99) for _ in 1:6]
+            ks = [rand(rng_eb, Binomial(100, p)) / 100.0 for p in ps]
+            push!(synth_evs, GLMEventData("UT$(ui)", "1", "chr1:60-90", "+", "TE",
+                                          1, 0.9, [1,2,3,4,5,6], ks, fill(100.0, 6),
+                                          3, 3, 100.0, 100.0))
+         end
+         design_eb = build_two_group_design(["a1","a2","a3"], ["b1","b2","b3"])
+         _, _, (sp_mu, sp_var, sp_n, utr_pr) = fit_glm_cohort(synth_evs, design_eb; stratify_eb=true)
+         @test sp_n <= 35 && sp_n >= 20
+         @test utr_pr !== nothing
+         u_mu, u_var, u_n = utr_pr
+         @test u_n <= 35 && u_n >= 20
+         phi_sp  = 1.0 / (1.0 + exp(sp_mu))
+         phi_utr = 1.0 / (1.0 + exp(u_mu))
+         @test phi_sp < 0.06
+         @test phi_utr > 2.0 * phi_sp
+         _, _, (_, _, comb_n, utr_off) = fit_glm_cohort(synth_evs, design_eb; stratify_eb=false)
+         @test comb_n <= 70
+         @test utr_off === nothing
       end
    end
 
@@ -941,6 +982,18 @@ IIIIIIIIIIII
       run(`$(Base.julia_cmd()) ../bin/whippet-quant.jl aber_inp.bam -x test_index.jls`)
       run(`$(Base.julia_cmd()) ../bin/whippet-quant.jl test.fq.gz -x test_index.jls`)
       run(`$(Base.julia_cmd()) ../bin/whippet-quant.jl test_real.fq.gz -x test_index.jls`)
+      # Test --batch manifest mode (loads index once across multiple samples)
+      bdir = mktempdir()
+      bman = joinpath(bdir, "manifest.csv")
+      open(bman, "w") do io_b
+         write(io_b, "sample,r1,r2,out_prefix\n")
+         write(io_b, "s1,$(abspath("test.fq.gz")),,$(joinpath(bdir, "s1_out"))\n")
+         write(io_b, "s2,$(abspath("test_real.fq.gz")),-,$(joinpath(bdir, "s2_out"))\n")
+      end
+      run(`$(Base.julia_cmd()) ../bin/whippet-quant.jl --batch $bman -x test_index.jls`)
+      @test isfile(joinpath(bdir, "s1_out.psi.gz"))
+      @test isfile(joinpath(bdir, "s2_out.psi.gz"))
+      rm(bdir, recursive=true, force=true)
        ## CHECK test.sort.bam, make 
    end
 end

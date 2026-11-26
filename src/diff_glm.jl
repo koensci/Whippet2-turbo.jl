@@ -1130,15 +1130,50 @@ function _test_single_event(ev::GLMEventData,
    return GLMResult(true, psi_a, psi_b, delta_psi, log_odds, se, phi, lrt, df, pval)
 end
 
+# Returns true iff an event is polymorphic (non-constitutive) and carries statistical
+# information about Beta-Binomial overdispersion phi. Constitutive/boundary events
+# (Psi == 0.0 or 1.0 across all samples) have a flat Beta-Binomial log-likelihood in M,
+# causing Cox-Reid -0.5 * logdet(X'WX) to create an artificial interior peak near phi ~ 0.64
+# that collapses the genome-wide Empirical Bayes prior.
+@inline function _is_polymorphic_event(ev::GLMEventData)::Bool
+   sum_k = 0.0
+   sum_r = 0.0
+   sum_n = 0.0
+   min_psi = Inf
+   max_psi = -Inf
+   @inbounds for j in 1:length(ev.psi)
+      p = ev.psi[j]
+      n = ev.reads[j]
+      if !isfinite(p) || !isfinite(n) || n <= 0.0
+         continue
+      end
+      kj = p * n
+      sum_k += kj
+      sum_r += n - kj
+      sum_n += n
+      p < min_psi && (min_psi = p)
+      p > max_psi && (max_psi = p)
+   end
+   (sum_n <= 0.0 || sum_k < 1.0 || sum_r < 1.0) && return false
+   pooled_psi = sum_k / sum_n
+   (pooled_psi <= 0.01 || pooled_psi >= 0.99) && return false
+   return (max_psi - min_psi) >= 1e-4
+end
+
+@inline function _is_utr_event(ev::GLMEventData)::Bool
+   return ev.etype == "TS" || ev.etype == "TE"
+end
+
 # Run full 3-pass Beta-Binomial GLM + Empirical Bayes dispersion shrinkage across a cohort
 function fit_glm_cohort(events::Vector{GLMEventData},
                         design::DesignSpec;
                         shrink_dispersion::Bool=true,
+                        stratify_eb::Bool=true,
                         fixed_phi::Float64=-1.0,
                         ridge::Float64=1e-4)
    nev = length(events)
    results = Vector{GLMResult}(undef, nev)
-   nev == 0 && return results, Float64[], (NaN, NaN, 0)
+   nev == 0 && return results, Float64[], (NaN, NaN, 0, nothing)
 
    # Check whether any event has residual degrees of freedom (m > p)
    has_replicates = false
@@ -1157,7 +1192,7 @@ function fit_glm_cohort(events::Vector{GLMEventData},
          results[i] = _test_single_event(events[i], design, th_fixed; ridge=ridge)
       end
       pvals = [res.pvalue for res in results]
-      return results, bh_fdr(pvals), (th_fixed, 0.0, 0)
+      return results, bh_fdr(pvals), (th_fixed, 0.0, 0, nothing)
    end
 
    if !has_replicates
@@ -1167,17 +1202,21 @@ function fit_glm_cohort(events::Vector{GLMEventData},
          results[i] = _test_single_event(events[i], design, th_def; ridge=ridge)
       end
       pvals = [res.pvalue for res in results]
-      return results, bh_fdr(pvals), (th_def, 0.0, 0)
+      return results, bh_fdr(pvals), (th_def, 0.0, 0, nothing)
    end
 
-   # Pass 2: Raw Cox-Reid dispersion estimation across all events in parallel
+   # Pass 2: Raw Cox-Reid dispersion estimation strictly on polymorphic events
+   # (skipping constitutive/boundary events whose flat likelihood creates artificial phi ~ 0.64 peaks).
    raw_thetas  = fill(NaN, nev)
    is_interior = fill(false, nev)
    samp_vars   = fill(NaN, nev)
    res_dfs     = zeros(Int, nev)
+   is_poly     = fill(false, nev)
 
    Threads.@threads for i in 1:nev
       ev = events[i]
+      _is_polymorphic_event(ev) || continue
+      is_poly[i] = true
       mats = _build_event_matrices(design.X, ev.valid_idx, design.test_cols)
       mats === nothing && continue
       X_full = mats[1]
@@ -1200,9 +1239,41 @@ function fit_glm_cohort(events::Vector{GLMEventData},
       res_dfs[i]     = d_res
    end
 
-   prior_mu, prior_var, n_prior = fit_eb_dispersion_prior(raw_thetas, is_interior, samp_vars, res_dfs)
+   combined_prior = fit_eb_dispersion_prior(raw_thetas, is_interior, samp_vars, res_dfs)
+
+   sp_prior = combined_prior
+   utr_prior = nothing
+   if stratify_eb
+      sp_th  = Float64[]; sp_int = Bool[]; sp_sv = Float64[]; sp_df = Int[]; n_sp_int = 0
+      u_th   = Float64[]; u_int  = Bool[]; u_sv  = Float64[]; u_df  = Int[]; n_u_int  = 0
+      @inbounds for i in 1:nev
+         is_poly[i] || continue
+         if _is_utr_event(events[i])
+            push!(u_th, raw_thetas[i]); push!(u_int, is_interior[i])
+            push!(u_sv, samp_vars[i]);  push!(u_df, res_dfs[i])
+            if is_interior[i] && isfinite(raw_thetas[i])
+               n_u_int += 1
+            end
+         else
+            push!(sp_th, raw_thetas[i]); push!(sp_int, is_interior[i])
+            push!(sp_sv, samp_vars[i]);  push!(sp_df, res_dfs[i])
+            if is_interior[i] && isfinite(raw_thetas[i])
+               n_sp_int += 1
+            end
+         end
+      end
+      if n_sp_int >= 20
+         sp_prior = fit_eb_dispersion_prior(sp_th, sp_int, sp_sv, sp_df)
+      end
+      if n_u_int >= 20
+         utr_prior = fit_eb_dispersion_prior(u_th, u_int, u_sv, u_df)
+      end
+   end
+
+   prior_mu, prior_var, n_prior = sp_prior
    # Effective prior degrees of freedom from Var(log chi2_d0) ≈ 2 / d0
-   df_prior = shrink_dispersion ? clamp(2.0 / prior_var, 1.0, 30.0) : 0.0
+   df_prior_sp  = shrink_dispersion ? clamp(2.0 / prior_var, 1.0, 30.0) : 0.0
+   df_prior_utr = utr_prior !== nothing ? (shrink_dispersion ? clamp(2.0 / utr_prior[2], 1.0, 30.0) : 0.0) : df_prior_sp
 
    # Pass 3: EB MAP dispersion shrinkage + LRT/F-test per event in parallel
    Threads.@threads for i in 1:nev
@@ -1217,8 +1288,14 @@ function fit_glm_cohort(events::Vector{GLMEventData},
       d_res = m - size(X_full, 2)
       has_df = d_res > 0
 
-      th_use = prior_mu
-      if has_df
+      if _is_utr_event(ev) && utr_prior !== nothing
+         pmu_s, pvar_s, df_p_s = utr_prior[1], utr_prior[2], df_prior_utr
+      else
+         pmu_s, pvar_s, df_p_s = prior_mu, prior_var, df_prior_sp
+      end
+
+      th_use = pmu_s
+      if is_poly[i] && has_df
          if shrink_dispersion
             k = Vector{Float64}(undef, m)
             r = Vector{Float64}(undef, m)
@@ -1228,19 +1305,19 @@ function fit_glm_cohort(events::Vector{GLMEventData},
                k[j] = kj
                r[j] = n[j] - kj
             end
-            th_use = estimate_eb_theta(k, r, n, X_full, prior_mu, prior_var; ridge=ridge)
+            th_use = estimate_eb_theta(k, r, n, X_full, pmu_s, pvar_s; ridge=ridge)
          elseif isfinite(raw_thetas[i])
             th_use = raw_thetas[i]
          end
       end
 
-      df_denom = (d_res > 0 || df_prior > 0.0) ? Float64(max(d_res, 0)) + df_prior : Inf
+      df_denom = (d_res > 0 || df_p_s > 0.0) ? Float64(max(d_res, 0)) + df_p_s : Inf
       results[i] = _test_single_event(ev, design, th_use; df_denom=df_denom, ridge=ridge)
    end
 
    pvals = [res.pvalue for res in results]
    fdr = bh_fdr(pvals)
-   return results, fdr, (prior_mu, prior_var, n_prior)
+   return results, fdr, (prior_mu, prior_var, n_prior, utr_prior)
 end
 
 @inline function _fmt_num(x::Float64, digits::Int)::String
@@ -1323,17 +1400,28 @@ function process_psi_files_glm(outfile::String,
                                min_samp::Int=1,
                                min_reads::Int=5,
                                shrink_dispersion::Bool=true,
+                               stratify_eb::Bool=true,
                                fixed_phi::Float64=-1.0,
                                ridge::Float64=1e-4)
    events = read_psi_cohort(design; min_reads=min_reads, min_samp=min_samp)
    println(stderr, "Loaded $(length(events)) testable events across $(length(design.files)) samples (using $(Threads.nthreads()) thread(s))...")
-   results, fdr, (pmu, pvar, np) = fit_glm_cohort(events, design;
-                                                  shrink_dispersion=shrink_dispersion,
-                                                  fixed_phi=fixed_phi,
-                                                  ridge=ridge)
+   results, fdr, (pmu, pvar, np, utr_prior) = fit_glm_cohort(events, design;
+                                                             shrink_dispersion=shrink_dispersion,
+                                                             stratify_eb=stratify_eb,
+                                                             fixed_phi=fixed_phi,
+                                                             ridge=ridge)
    if fixed_phi <= 0.0 && isfinite(pmu)
       prior_phi = 1.0 / (1.0 + exp(pmu))
-      println(stderr, "Empirical Bayes dispersion prior (from $np events): median phi = $(round(prior_phi, sigdigits=3)), sd(log M) = $(round(sqrt(pvar), digits=3))")
+      d0_sp = shrink_dispersion ? clamp(2.0 / pvar, 1.0, 30.0) : 0.0
+      if utr_prior !== nothing
+         umu, uvar, unp = utr_prior
+         uphi = 1.0 / (1.0 + exp(umu))
+         d0_u = shrink_dispersion ? clamp(2.0 / uvar, 1.0, 30.0) : 0.0
+         println(stderr, "Empirical Bayes dispersion prior [Spliced] (from $np events): median phi = $(round(prior_phi, sigdigits=3)), sd(log M) = $(round(sqrt(pvar), digits=3)), d0 = $(round(d0_sp, digits=2))")
+         println(stderr, "Empirical Bayes dispersion prior [Tandem UTR] (from $unp events): median phi = $(round(uphi, sigdigits=3)), sd(log M) = $(round(sqrt(uvar), digits=3)), d0 = $(round(d0_u, digits=2))")
+      else
+         println(stderr, "Empirical Bayes dispersion prior (from $np events): median phi = $(round(prior_phi, sigdigits=3)), sd(log M) = $(round(sqrt(pvar), digits=3)), d0 = $(round(d0_sp, digits=2))")
+      end
    end
    n_tested = count(r -> r.tested, results)
    n_sig = count(i -> results[i].tested && isfinite(fdr[i]) && fdr[i] <= 0.05, 1:length(results))

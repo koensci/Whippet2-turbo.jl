@@ -47,15 +47,15 @@ To stabilize dispersion estimation across events with small sample sizes while a
 1. **Pass 1 — Lockstep Cohort Loading & Per-Event Rank Reduction:**
    Valid samples are filtered per event (`--min-reads`, `--min-samples`). For each event's valid subset $X_{\text{sub}}$, column-pivoted QR decomposition (`qr(A, ColumnNorm())`) retains the intercept first, drops any nuisance covariate columns that become collinear due to per-event missingness (e.g., an absent batch level), and skips events only if the tested contrast itself loses identifiability.
 
-2. **Pass 2 — Raw Cox–Reid Adjusted Profile Likelihood (APL):**
-   For every event with residual degrees of freedom $d_{\text{res}, i} = m_i - p_i > 0$, raw log-precision $\hat{\theta}_i$ maximizes the Cox–Reid APL (McCarthy, Chen & Smyth, *NAR* 2012) over $\theta \in [-4.0, 11.5]$ ($\phi \in [10^{-5}, 0.982]$) via coarse grid + golden-section search:
+2. **Pass 2 — Raw Cox–Reid Adjusted Profile Likelihood (APL) on Polymorphic Events:**
+   Constitutive/boundary events ($\sum_j k_{ij} < 1$, $\sum_j r_{ij} < 1$, pooled $\bar{\Psi}_i \le 0.01$ or $\ge 0.99$, or $\max_j \Psi_{ij} - \min_j \Psi_{ij} < 10^{-4}$) have a flat Beta-Binomial log-likelihood in $M_i$, where the Cox–Reid $-\tfrac{1}{2}\ln\det(X^\top W X)$ penalty alone produces an artificial interior peak near $\phi \approx 0.64$. Such events are excluded from Pass 2 raw dispersion estimation and Pass 3 MAP optimization (receiving their stratum prior $\mu_\theta$ directly). For every polymorphic event with residual degrees of freedom $d_{\text{res}, i} = m_i - p_i > 0$, raw log-precision $\hat{\theta}_i$ maximizes the Cox–Reid APL (McCarthy, Chen & Smyth, *NAR* 2012) over $\theta \in [-4.0, 11.5]$ ($\phi \in [10^{-5}, 0.982]$) via coarse grid + golden-section search:
 
    $$\text{APL}(\theta) = \ell(\hat{\beta}_i(e^\theta), e^\theta) - \tfrac{1}{2}\ln\det\!\left(X_i^\top W_i(\theta) X_i + 10^{-8} I\right).$$
 
    For interior optima, local sampling variance $s_i^2 = 1 / (-\text{APL}''(\hat{\theta}_i))$ is estimated by 3-point finite differences.
 
-3. **Genome-Wide Empirical Bayes Prior with Finite-df Bias Correction:**
-   Across interior event estimates, a robust normal prior $\theta_i \sim \mathcal{N}(\mu_\theta, \sigma_\theta^2)$ is fitted via median and MAD ($\hat{\sigma}_{\text{obs}} = 1.4826 \cdot \text{MAD}(\hat{\theta})$). Because finite residual degrees of freedom bias sample dispersion medians downward ($\hat{\phi} \propto \chi^2_d / d$, shifting $\hat{\theta}$ upward), the prior mean applies Smyth's exact $\log\chi^2$ median bias correction:
+3. **Event-Class Stratified Empirical Bayes Priors with Finite-df Bias Correction:**
+   Because exon-body tandem UTR events (`TS`, `TE`) exhibit substantially higher biological and positional coverage dispersion than splice-junction events (`CE`, `AA`, `AD`, `RI`, `AF`, `AL`), `whippet-delta.jl` fits separate robust normal priors $\theta_i \sim \mathcal{N}(\mu_\theta, \sigma_\theta^2)$ for **Spliced** vs. **Tandem UTR (`TS`/`TE`)** polymorphic events by default (falling back to the combined polymorphic prior if a stratum has $< 20$ interior events; disable via `--no-stratify-eb`). Within each stratum, $\hat{\sigma}_{\text{obs}} = 1.4826 \cdot \text{MAD}(\hat{\theta})$, and because finite residual degrees of freedom bias sample dispersion medians downward ($\hat{\phi} \propto \chi^2_d / d$, shifting $\hat{\theta}$ upward), the prior mean applies Smyth's exact $\log\chi^2$ median bias correction:
 
    $$\mu_\theta = \text{median}(\hat{\theta}) + \ln\!\left(\frac{\text{median}(\chi^2_{\bar{d}_{\text{res}}})}{\bar{d}_{\text{res}}}\right), \qquad \sigma_\theta^2 = \text{clamp}\!\left(\hat{\sigma}_{\text{obs}}^2 - \text{median}(s^2),\; 0.08,\; 9.0\right),$$
 

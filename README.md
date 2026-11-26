@@ -134,7 +134,21 @@ julia --project=. -t auto bin/whippet-quant.jl \
   -o sample_out
 ```
 
-#### c) Additional options
+#### c) Batch cohort mode (`--batch`, loads index once across all samples)
+Provide a CSV or TSV manifest with columns `sample,r1,r2,out_prefix` (leave `r2` empty or `-`/`NA` for single-end or BAM inputs) or `sample,r1,out_prefix`:
+```csv
+sample,r1,r2,out_prefix
+S1,/path/to/S1_R1.fastq.gz,/path/to/S1_R2.fastq.gz,out/S1
+S2,/path/to/S2_R1.fastq.gz,/path/to/S2_R2.fastq.gz,out/S2
+```
+```bash
+julia --project=. -t auto bin/whippet-quant.jl \
+  --batch manifest.csv \
+  -x index/graph.jls \
+  --biascorrect
+```
+
+#### d) Additional options
 * **SAM output:** Add `--sam` to stream alignments to `stdout` (e.g., `... --sam | samtools view -bS - > sample.bam`).
 * **Circular RNA back-splicing:** Add `--circ` to quantify back-spliced (`BS`) junctions.
 * **Pooled / piped gzip streams without `.gz` extension:** Add `--force-gz`:
@@ -203,6 +217,7 @@ julia --project=. -t auto bin/whippet-delta.jl \
 | `-s, --min-samples` | `1` | Minimum valid samples required (per group in 2-group/contrast mode; total in general GLM mode). |
 | `--file-col` | `file` | Column name in `--design` containing `.psi.gz` paths. |
 | `--no-shrink` | off | Disable Empirical Bayes dispersion shrinkage (use per-event Cox–Reid dispersion MLE). |
+| `--no-stratify-eb` | off | Pool spliced (`CE`/`AA`/`AD`/`RI`/`AF`/`AL`) and tandem UTR (`TS`/`TE`) events into one Empirical Bayes dispersion prior instead of fitting separate stratum priors. |
 | `--fixed-dispersion` | off | Fix Beta-Binomial overdispersion $\phi \in (0, 1)$ (recommended for unreplicated 1 vs 1 exploratory runs, e.g., `--fixed-dispersion 0.05`). |
 | `--legacy` | off | Use original Whippet 10,000-draw Beta Monte Carlo method (`-a`/`-b` mode only). |
 

@@ -64,6 +64,9 @@ function parse_cmd()
     "--no-shrink"
       help     = "Disable Empirical Bayes dispersion shrinkage (use per-event Cox-Reid dispersion MLE)."
       action   = :store_true
+    "--no-stratify-eb"
+      help     = "Disable separate Empirical Bayes dispersion priors for spliced (CE/AA/AD/RI/AF/AL) vs. tandem UTR (TS/TE) events."
+      action   = :store_true
     "--fixed-dispersion"
       help     = "Use a fixed Beta-Binomial overdispersion phi in (0, 1) instead of estimating from data (disabled if <= 0)."
       arg_type = Float64
@@ -175,6 +178,7 @@ function main()
                                     min_samp=args["min-samples"],
                                     min_reads=args["min-reads"],
                                     shrink_dispersion=!args["no-shrink"],
+                                    stratify_eb=!args["no-stratify-eb"],
                                     fixed_phi=args["fixed-dispersion"] )
    end
 

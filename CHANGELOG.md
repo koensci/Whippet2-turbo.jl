@@ -4,13 +4,16 @@
 
 Upgraded `whippet-delta.jl` with a multithreaded Beta-Binomial GLM differential splicing engine supporting covariates, Empirical Bayes dispersion shrinkage, and Benjamini–Hochberg FDR (developed using Gemini 4 Neon). Requires zero new Julia dependencies and maintains full `.jls` index and `.psi.gz` compatibility with `v2.0.0-fork.1` and `v2.0.0-fork.2`.
 
+### Batch Cohort Quantification (`whippet-quant`)
+* **Single-load `--batch <manifest.csv|tsv>` mode (`bin/whippet-quant.jl`):** Quantifies an entire cohort in one Julia session (loading and deserializing the `.jls` index once, with explicit `GC.gc()` between samples so peak memory stays flat), supporting both 3-column (`sample,r1,out_prefix`) and 4-column (`sample,r1,r2,out_prefix`) manifests.
+
 ### Bug Fixes
 * **Tandem-start (`TS`) path-to-node PSI reversal (`src/io.jl`):** Fixed an upstream bug in `output_utr` where `build_utr_graph` popped `TXST_MOTIF` (`TS`) nodes in descending order (`end_n` down to `start_n`) while `output_utr` iterated `n in st:en` with ascending index `i`, swapping upstream and downstream `TS` PSI/CI/`Inc_Paths` rows. Added a 3-node `TS` unit test in `test/runtests.jl` (all 601,423 assertions pass).
 
 ### Differential Splicing Improvements (`whippet-delta`)
 * **Beta-Binomial GLM with Cox–Reid Empirical Bayes shrinkage (`src/diff_glm.jl`, `src/Whippet.jl`):**
   * Continuous Beta-Binomial log-likelihood handling fractional read counts (`k = Psi * Total_Reads`) with damped Fisher scoring (IRLS) and light ridge stabilization for complete separation (`0.0` vs `1.0` PSI).
-  * 3-pass multithreaded estimation: lockstep `.psi.gz` cohort loading (`read_psi_cohort`), per-event Cox–Reid Adjusted Profile Likelihood (APL) dispersion estimation, genome-wide robust Empirical Bayes prior with Smyth finite-df $\log\chi^2$ median bias correction (`fit_eb_dispersion_prior`), and MAP shrunk dispersion (`estimate_eb_theta`).
+  * 3-pass multithreaded estimation: lockstep `.psi.gz` cohort loading (`read_psi_cohort`), constitutive/boundary event exclusion (`_is_polymorphic_event`), per-event Cox–Reid Adjusted Profile Likelihood (APL) dispersion estimation, event-class stratified Empirical Bayes priors (separate Spliced vs. Tandem UTR `TS`/`TE` priors with Smyth finite-df $\log\chi^2$ median bias correction; disable with `--no-stratify-eb`), and MAP shrunk dispersion (`estimate_eb_theta`).
   * Finite-sample $F(\text{df},\, d_{\text{res}} + d_0)$ likelihood-ratio tests (`edgeR`-style effective prior degrees of freedom) and Benjamini–Hochberg `FDR`, plus covariate-adjusted marginal `Psi_A`, `Psi_B`, `DeltaPsi`, `LogOddsRatio`, `SE`, and `Dispersion`.
 * **DESeq2-style covariate formulas & CLI (`bin/whippet-delta.jl`):**
   * Added `--design`, `--file-col` (default `file`), `--formula` (supporting additive terms, continuous numeric covariates, and `*`/`:` interactions), and `--test` (explicit contrasts like `Sample_Type:ewing_vs_msc`, binary factors, continuous covariates, or multi-level omnibus LRTs), with automatic per-event rank/collinearity handling under missingness.
