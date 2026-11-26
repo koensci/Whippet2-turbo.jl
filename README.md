@@ -147,7 +147,7 @@ julia --project=. -t auto bin/whippet-quant.jl \
 
 ### 4) Differential Splicing (`whippet-delta.jl`)
 
-`whippet-delta.jl` fits a **Beta-Binomial GLM** across samples using each event's inclusion count ($k_{ij} = \Psi_{ij} N_{ij}$) and total read depth ($N_{ij}$), with **Cox–Reid Empirical Bayes dispersion shrinkage**, **finite-sample $F$-test LRT p-values**, and **Benjamini–Hochberg FDR**.
+`whippet-delta.jl` fits a **Beta-Binomial GLM** across samples using each event's inclusion count ($k_{ij} = \Psi_{ij} N_{ij}$) and total read depth ($N_{ij}$), with **Cox–Reid Empirical Bayes dispersion shrinkage**, **finite-sample $F$-test LRT p-values**, and **Benjamini–Hochberg FDR**. See [`docs/GLM_METHODS.md`](docs/GLM_METHODS.md) for the full statistical formulation, equations, and example manuscript methods text.
 
 #### a) Simple 2-group comparison (`-a` vs `-b`)
 Pass glob patterns or comma-separated file lists for Set A and Set B (`DeltaPsi = Psi_A - Psi_B`):
