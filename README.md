@@ -1,4 +1,4 @@
-# Whippet (`koensci/Whippet.jl` fork)
+# Whippet2-turbo (`Whippet.jl` fork)
 
 > **Fork Notice:** This repository (`whippet2` branch, `v2.0.0-fork.2`) is a performance-optimized and bug-fixed fork of the `whippet2-julia19-dev` branch of [timbitz/Whippet.jl](https://github.com/timbitz/Whippet.jl). The performance optimizations and bug fixes in this fork were developed using Gemini 4 Neon. All original Whippet algorithms, architecture, and licensing remain the work of Tim Sterne-Weiler (Sterne-Weiler et al., *Molecular Cell* 2018).
 
