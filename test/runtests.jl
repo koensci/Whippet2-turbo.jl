@@ -25,6 +25,8 @@ using LinearAlgebra
 using Nullables
 using Printf
 using Random
+using CSV
+using DataFrames
 
 include("../src/types.jl")
 include("../src/timer.jl")
@@ -44,6 +46,7 @@ include("../src/paired.jl")
 include("../src/events.jl")
 include("../src/io.jl")
 include("../src/diff.jl")
+include("../src/diff_glm.jl")
 
 @testset "SG Kmers & Seq" begin
    @test sgkmer(dna"ATG") == BioSequences.DNAMer(dna"ATG")
@@ -772,7 +775,120 @@ IIIIIIIIIIII
       end
 
       @testset "Diff and Delta" begin
+         # 1. Beta-Binomial MLE & LRT on strong 2-group difference (including fractional counts)
+         k = Float64[80.5, 76.2, 82.0, 20.1, 18.4, 21.5]
+         n = Float64[100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+         r = n .- k
+         X = [1.0 1.0; 1.0 1.0; 1.0 1.0; 1.0 0.0; 1.0 0.0; 1.0 0.0]
+         beta, ll_full, H, conv = fit_bb_beta(k, r, n, X, 50.0)
+         @test conv
+         @test isapprox(_logistic(beta[1]), 0.20, atol=0.02)
+         @test isapprox(_logistic(beta[1] + beta[2]), 0.80, atol=0.02)
+         _, ll_null, _, _ = fit_bb_beta(k, r, n, X[:, 1:1], 50.0)
+         @test 2.0 * (ll_full - ll_null) > 30.0
 
+         # 2. Complete separation (1.0 vs 0.0 PSI) converges cleanly without NaN/Inf
+         k_sep = Float64[50.0, 40.0, 60.0, 0.0, 0.0, 0.0]
+         n_sep = Float64[50.0, 40.0, 60.0, 50.0, 40.0, 60.0]
+         r_sep = n_sep .- k_sep
+         b_sep, ll_sep, _, _ = fit_bb_beta(k_sep, r_sep, n_sep, X, 20.0)
+         @test all(isfinite, b_sep) && isfinite(ll_sep)
+         @test _logistic(b_sep[1] + b_sep[2]) > 0.98
+         @test _logistic(b_sep[1]) < 0.02
+
+         # 3. Benjamini-Hochberg FDR (including NaN preservation)
+         fdr = bh_fdr([0.001, 0.04, NaN, 0.02, 0.5])
+         @test isapprox(fdr[1], 0.004, atol=1e-12)
+         @test isapprox(fdr[4], 0.04, atol=1e-12)
+         @test isapprox(fdr[2], 0.053333333333, atol=1e-9)
+         @test isnan(fdr[3])
+         @test isapprox(fdr[5], 0.5, atol=1e-12)
+
+         # 4. Formula parsing (additive, interaction, * expansion)
+         @test parse_formula_terms("~ batch + donor + condition") == [["batch"], ["donor"], ["condition"]]
+         @test parse_formula_terms("~ batch * condition") == [["batch"], ["condition"], ["batch", "condition"]]
+
+         # 5. End-to-end covariate-adjusted Beta-Binomial GLM on synthetic batch-confounded .psi.gz files
+         #    6 samples across 2 batches (B1, B2) and 2 conditions (ctrl, trt), plus continuous covariate `age`:
+         #    - Event 1 (strong true condition effect + batch shift):
+         #        B1 ctrl ≈ 0.20, B1 trt ≈ 0.70; B2 ctrl ≈ 0.40, B2 trt ≈ 0.85
+         #    - Event 2 (pure batch effect, ZERO condition effect):
+         #        B1 ctrl ≈ 0.20, B1 trt ≈ 0.20; B2 ctrl ≈ 0.80, B2 trt ≈ 0.80
+         #    - Events 3..24 (null background for EB dispersion prior estimation)
+         tmpdir = mktempdir()
+         psi_files = String[]
+         meta_rows = [
+            ("s1", "s1.psi.gz", "ctrl", "B1", 30.0),
+            ("s2", "s2.psi.gz", "ctrl", "B1", 35.0),
+            ("s3", "s3.psi.gz", "ctrl", "B2", 50.0),
+            ("s4", "s4.psi.gz", "trt",  "B1", 32.0),
+            ("s5", "s5.psi.gz", "trt",  "B2", 52.0),
+            ("s6", "s6.psi.gz", "trt",  "B2", 58.0),
+         ]
+         ev1_psi = [0.20, 0.22, 0.40, 0.72, 0.84, 0.86]
+         ev2_psi = [0.20, 0.21, 0.80, 0.19, 0.79, 0.81]
+         rng_glm = MersenneTwister(2026)
+         bg_psi = [clamp.(0.5 .+ 0.05 .* randn(rng_glm, 6), 0.05, 0.95) for _ in 1:22]
+
+         for (si, (sname, fname, cond, batch, age)) in enumerate(meta_rows)
+            fpath = joinpath(tmpdir, fname)
+            push!(psi_files, fpath)
+            io_p = open(fpath, "w")
+            st_p = ZlibDeflateOutputStream(io_p)
+            write(st_p, "Gene\tNode\tCoord\tStrand\tType\tPsi\tCI_Width\tCI_Lo,Hi\tTotal_Reads\tComplexity\tEntropy\tInc_Paths\tExc_Paths\tEdges\n")
+            write(st_p, "GENE1\t2\tchr1:100-200\t+\tCE\t$(ev1_psi[si])\t0.1\t0.1,0.2\t100.0\tK1\t0.8\t1\t1\t1-2:50\n")
+            write(st_p, "GENE2\t2\tchr1:300-400\t+\tCE\t$(ev2_psi[si])\t0.1\t0.1,0.2\t100.0\tK1\t0.8\t1\t1\t1-2:50\n")
+            for bi in 1:length(bg_psi)
+               write(st_p, "BG$(bi)\t2\tchr1:$(500+bi*100)-$(550+bi*100)\t+\tCE\t$(round(bg_psi[bi][si], digits=4))\t0.1\t0.4,0.6\t80.0\tK1\t0.9\t1\t1\t1-2:40\n")
+            end
+            close(st_p); close(io_p)
+         end
+
+         design_tsv = joinpath(tmpdir, "design.tsv")
+         open(design_tsv, "w") do io_d
+            write(io_d, "sample\tfile\tcondition\tbatch\tage\n")
+            for (sname, fname, cond, batch, age) in meta_rows
+               write(io_d, "$sname\t$fname\t$cond\t$batch\t$age\n")
+            end
+         end
+
+         design_cov = build_design_from_table(design_tsv, "~ batch + condition";
+                                              test_spec="condition:trt_vs_ctrl", dir=tmpdir)
+         @test design_cov.is_two_group
+         @test size(design_cov.X) == (6, 3)
+
+         out_cov = joinpath(tmpdir, "out_cov.diff.gz")
+         evs_c, res_c, fdr_c = process_psi_files_glm(out_cov, design_cov; min_samp=2, min_reads=5)
+         @test length(evs_c) == 24
+         # Event 1: true condition effect detected with positive DeltaPsi (trt > ctrl) and tiny FDR
+         @test res_c[1].tested
+         @test res_c[1].delta_psi > 0.40
+         @test fdr_c[1] < 1e-3
+         # Event 2: pure batch effect completely controlled for by `~ batch + condition`!
+         @test res_c[2].tested
+         @test abs(res_c[2].delta_psi) < 0.05
+         @test res_c[2].pvalue > 0.30
+
+         # 6. Classic 2-group design (`build_two_group_design`) sign convention: DeltaPsi = Psi_A - Psi_B
+         design_2g = build_two_group_design(psi_files[4:6], psi_files[1:3])
+         out_2g = joinpath(tmpdir, "out_2g.diff.gz")
+         _, res_2g, _ = process_psi_files_glm(out_2g, design_2g; min_samp=2, min_reads=5)
+         @test res_2g[1].delta_psi > 0.50
+         @test isapprox(res_2g[1].delta_psi, res_2g[1].psi_a - res_2g[1].psi_b, atol=1e-9)
+
+         # 7. Continuous covariate test (`~ age`)
+         design_age = build_design_from_table(design_tsv, "~ age"; test_spec="age", dir=tmpdir)
+         @test design_age.is_continuous_test
+         out_age = joinpath(tmpdir, "out_age.diff.gz")
+         _, res_age, _ = process_psi_files_glm(out_age, design_age; min_samp=2, min_reads=5)
+         @test res_age[2].tested && res_age[2].pvalue < 0.01 # Event 2 correlates strongly with B2 (older age)
+
+         # 8. CLI end-to-end check on both new GLM (--design and -a/-b) and --legacy modes
+         run(`$(Base.julia_cmd()) --project=.. ../bin/whippet-delta.jl --design $design_tsv --formula "~ batch + condition" --test condition:trt_vs_ctrl -d $tmpdir -o $(joinpath(tmpdir, "cli_cov"))`)
+         @test isfile(joinpath(tmpdir, "cli_cov.diff.gz"))
+         run(`$(Base.julia_cmd()) --project=.. ../bin/whippet-delta.jl -a $(join(psi_files[4:6], ',')) -b $(join(psi_files[1:3], ',')) --legacy -o $(joinpath(tmpdir, "cli_leg"))`)
+         @test isfile(joinpath(tmpdir, "cli_leg.diff.gz"))
+         rm(tmpdir, recursive=true, force=true)
       end
    end
 

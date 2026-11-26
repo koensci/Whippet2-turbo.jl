@@ -48,6 +48,7 @@ include("paired.jl")
 include("events.jl")
 include("io.jl")
 include("diff.jl")
+include("diff_glm.jl")
 include("motif.jl")
 
 export SpliceGraph,
@@ -130,6 +131,13 @@ export SpliceGraph,
        timer_print,
        open_streams,
        process_psi_files,
+       DesignSpec,
+       build_two_group_design,
+       build_design_from_table,
+       read_psi_cohort,
+       fit_glm_cohort,
+       process_psi_files_glm,
+       bh_fdr,
        tab_write,
        end_write,
        RNABindNSeq,

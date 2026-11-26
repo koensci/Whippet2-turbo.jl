@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.0-fork.3
+
+Upgraded `whippet-delta.jl` with a multithreaded Beta-Binomial GLM differential splicing engine supporting covariates, Empirical Bayes dispersion shrinkage, and Benjamini–Hochberg FDR (developed using Gemini 4 Neon). Requires zero new Julia dependencies and maintains full `.jls` index and `.psi.gz` compatibility with `v2.0.0-fork.1` and `v2.0.0-fork.2`.
+
+### Differential Splicing Improvements (`whippet-delta`)
+* **Beta-Binomial GLM with Cox–Reid Empirical Bayes shrinkage (`src/diff_glm.jl`, `src/Whippet.jl`):**
+  * Continuous Beta-Binomial log-likelihood handling fractional read counts (`k = Psi * Total_Reads`) with damped Fisher scoring (IRLS) and light ridge stabilization for complete separation (`0.0` vs `1.0` PSI).
+  * 3-pass multithreaded estimation: lockstep `.psi.gz` cohort loading (`read_psi_cohort`), per-event Cox–Reid Adjusted Profile Likelihood (APL) dispersion estimation, genome-wide robust Empirical Bayes prior with Smyth finite-df $\log\chi^2$ median bias correction (`fit_eb_dispersion_prior`), and MAP shrunk dispersion (`estimate_eb_theta`).
+  * Finite-sample $F(\text{df},\, d_{\text{res}} + d_0)$ likelihood-ratio tests (`edgeR`-style effective prior degrees of freedom) and Benjamini–Hochberg `FDR`, plus covariate-adjusted marginal `Psi_A`, `Psi_B`, `DeltaPsi`, `LogOddsRatio`, `SE`, and `Dispersion`.
+* **DESeq2-style covariate formulas & CLI (`bin/whippet-delta.jl`):**
+  * Added `--design`, `--file-col` (default `file`), `--formula` (supporting additive terms, continuous numeric covariates, and `*`/`:` interactions), and `--test` (explicit contrasts like `Sample_Type:ewing_vs_msc`, binary factors, continuous covariates, or multi-level omnibus LRTs), with automatic per-event rank/collinearity handling under missingness.
+  * Classic `-a`/`-b` mode now uses the new Beta-Binomial GLM by default; added `--no-shrink`, `--fixed-dispersion`, and `--legacy` (to reproduce original Whippet Beta Monte Carlo).
+* **Tests (`test/runtests.jl`):** Added 29 unit and end-to-end CLI tests in `@testset "Diff and Delta"` covering Beta-Binomial MLE/LRT, complete separation, BH FDR, formula parsing, covariate adjustment on batch-confounded `.psi.gz` cohorts, continuous covariates, and CLI execution.
+
+---
+
 ## v2.0.0-fork.2
 
 Second wave of `whippet-quant` performance optimizations (developed using Gemini 4 Neon). Maintains **100% `.jls` index compatibility** and **byte-for-byte identical uncompressed outputs** with `v2.0.0-fork.1`.
