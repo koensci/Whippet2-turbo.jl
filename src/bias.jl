@@ -354,6 +354,9 @@ end
 @fastmath value!( mod::JointBiasMod, bin::Int ) = (mod.gcfore[bin] > 0.0 && mod.gcback[bin] > 0.0) ? mod.gcback[bin] / mod.gcfore[bin] : 1.0
 
 
+const _EMPTY_PRIMER_MAP = Dict{UInt16,Int32}()
+const _EMPTY_GC_VEC     = Int32[]
+
 mutable struct JointBiasCounter <: ReadCounter
    count::Float64
    map::Dict{UInt16,Int32}
@@ -361,8 +364,7 @@ mutable struct JointBiasCounter <: ReadCounter
    isadjusted::Bool
 
    function JointBiasCounter( gc_param = GCBiasParams(50, 0.05) )
-      gc = zeros(Int32, Int(ceil(1.0 / gc_param.width)+1))
-      new(0.0, Dict{UInt16,Int32}(), gc, false)
+      new(0.0, _EMPTY_PRIMER_MAP, _EMPTY_GC_VEC, false)
    end
 end
 
@@ -383,12 +385,28 @@ function Base.push!( cnt::JointBiasCounter, temp::JointBiasTemp )
 end
 
 function Base.push!( cnt::JointBiasCounter, bin::Int32 )
-   cnt.gc[bin] += one(Int32)
+   gc = cnt.gc
+   b = Int(bin)
+   if gc === _EMPTY_GC_VEC || isempty(gc)
+      gc = zeros(Int32, max(21, b))
+      cnt.gc = gc
+   elseif b > length(gc)
+      oldlen = length(gc)
+      resize!(gc, b)
+      @inbounds for k in (oldlen + 1):b
+         gc[k] = zero(Int32)
+      end
+   end
+   @inbounds gc[b] += one(Int32)
    cnt
 end
 
 function Base.push!( cnt::JointBiasCounter, hept::UInt16 )
    d = cnt.map
+   if d === _EMPTY_PRIMER_MAP
+      d = Dict{UInt16,Int32}()
+      cnt.map = d
+   end
    ht_idx = Base.ht_keyindex( d, hept )
    if ht_idx > 0
       @inbounds d.vals[ht_idx] += Int32(1)
@@ -401,27 +419,34 @@ end
 adjust!( cnt::JointBiasCounter, mod::JointBiasMod ) = !cnt.isadjusted ? primer_adjust!( cnt, mod ) : gc_adjust!( cnt, mod )
 
 @inline function primer_adjust!( cnt::JointBiasCounter, mod::JointBiasMod )
-   for (k,v) in cnt.map
-      cnt.count += value!( mod, k ) * v
+   d = cnt.map
+   if !isempty(d)
+      for (k,v) in d
+         cnt.count += value!( mod, k ) * v
+      end
+      cnt.count /= mod.forenpos
+      cnt.map = _EMPTY_PRIMER_MAP
    end
-   cnt.count /= mod.forenpos
    cnt.isadjusted = true
 end
 
 @inline function gc_adjust!( cnt::JointBiasCounter, mod::JointBiasMod )
-   weight = 0.0
-   gcsum = Int32(0)
    gc = cnt.gc
-   @inbounds for i in 1:length(gc)
-      c = gc[i]
-      if c > 0
-         weight += value!( mod, i ) * c
-         gcsum += c
+   if !isempty(gc)
+      weight = 0.0
+      gcsum = Int32(0)
+      @inbounds for i in 1:length(gc)
+         c = gc[i]
+         if c > 0
+            weight += value!( mod, i ) * c
+            gcsum += c
+         end
       end
-   end
-   if gcsum > 0
-      weight /= gcsum
-      cnt.count *= weight
+      if gcsum > 0
+         weight /= gcsum
+         cnt.count *= weight
+      end
+      cnt.gc = _EMPTY_GC_VEC
    end
    cnt
 end

@@ -176,6 +176,20 @@ function parse_batch_manifest(manifest_path::AbstractString)
    return entries
 end
 
+function _release_os_memory!()
+   GC.gc(true)
+   GC.gc(true)
+   @static if Sys.isapple()
+      ccall(:malloc_zone_pressure_relief, Csize_t, (Ptr{Cvoid}, Csize_t), C_NULL, 0)
+   elseif Sys.islinux()
+      try
+         ccall(:malloc_trim, Cint, (Csize_t,), 0)
+      catch
+      end
+   end
+   nothing
+end
+
 function quantify_one_sample( lib, args, indexpath::String, inputfile::String, matefile::Union{Nothing,String}, outprefix::String )
    isbaminput = hasextension(inputfile, ".bam")
 
@@ -257,6 +271,10 @@ function quantify_one_sample( lib, args, indexpath::String, inputfile::String, m
    primer_adjust!( multi, mod )
    println(stderr, "- $( length(multi.map) ) multi-gene mapping read equivalence classes...")
    build_equivalence_classes!( quant, lib, assign_long=true )
+   # sgq.long entries have been assigned to nodes/edges and compatibility classes; free them now
+   for sgq in quant.quant
+      empty!(sgq.long)
+   end
    println(stderr, "- $( length(quant.classes) ) multi-isoform equivalence classes...")
    calculate_tpm!( quant, readlen=readlen )
    @timer iter = gene_em!( quant, multi, sig=1, readlen=readlen, maxit=10000 )
@@ -273,10 +291,19 @@ function quantify_one_sample( lib, args, indexpath::String, inputfile::String, m
    println(stderr, "Assigning multi-mapping reads based on maximum likelihood estimate..")
    # Now assign multi to edges.
    @timer assign_ambig!( quant, lib, multi )
+   empty!(multi.map)
+   empty!(quant.classes)
 
    effective_lengths!( lib, quant, 1, 0)
    println(stderr, "Calculating maximum likelihood estimate of events..." )
    @timer process_events( outprefix * ".psi.gz" , lib, quant, iscircok=args["circ"], readlen=readlen )
+   # Drop per-sample graph counts before returning so batch GC can reclaim immediately
+   for sgq in quant.quant
+      empty!(sgq.node)
+      empty!(sgq.circ)
+   end
+   empty!(quant.quant)
+   nothing
 end
 
 function main()
@@ -313,7 +340,7 @@ function main()
          println(stderr, "\n=== [$si/$nsamp] Sample: $sname -> $out_pref ===")
          quantify_one_sample( lib, args, indexpath, r1, r2, out_pref )
          if si < nsamp
-            GC.gc()
+            _release_os_memory!()
          end
       end
       println(stderr, "\nWhippet $ver batch done ($nsamp samples)." )

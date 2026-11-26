@@ -127,6 +127,13 @@ end
    @test value!( gcmod, fwd_bin ) ≈ 2.0
    @test value!( gcmod, rev_bin ) == 1.0
    @test add_to_back!( gcmod.gcback, egc, 1.0 ) === gcmod.gcback
+   # Lazy sentinel & eager release after primer_adjust! / gc_adjust!
+   lazy_cnt = JointBiasCounter()
+   @test isempty(lazy_cnt.map) && isempty(lazy_cnt.gc)
+   primer_adjust!( gccnt, gcmod )
+   @test isempty(gccnt.map)
+   gc_adjust!( gccnt, gcmod )
+   @test isempty(gccnt.gc)
 
    # Regression test for SRA FASTQ records with +SRR... line-3 text containing N/n bases
    sra_fq = IOBuffer("@SRR8615273.1 1 length=10\nNCGTnCGTAN\n+SRR8615273.1 1 length=10\n#III#IIII#\n")
