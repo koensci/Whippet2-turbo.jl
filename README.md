@@ -16,8 +16,8 @@
   * Single-load `--batch <manifest.csv|tsv>` cohort mode with lazy/eager bias buffer reclamation and OS malloc trim (`malloc_zone_pressure_relief` / `malloc_trim`), keeping peak memory flat across all samples (~9.8 GB on full human 480M-read cohorts).
   * Automatic `igzip` / `pigz` FASTQ decompression via POSIX `popen` (avoiding libuv lock contention; automatically falls back to `Libz`).
   * Exact FM-index seed re-check skipping, zero-allocation FASTQ/seed/k-mer/bias/output hot paths, and parallel `process_events` with concurrent RFC 1952 gzip compression.
-* **12.3× faster full-human `whippet-index.jl` (`27.6 s`, `4.90 GB` RSS — `8.4×` faster than prior Julia 1.9):**
-  * Eliminated $O(G^2)$ splice-graph sequence concatenation (~450 GiB of temporary copies), $O(N \times M)$ GTF coordinate deduplication, and per-push k-mer edge re-sorting; parallelized per-chromosome `SpliceGraph` construction across threads while maintaining **100% `.jls` binary compatibility**.
+* **12×–26× faster full-human `whippet-index.jl` (`27.6 s` GRCh37.71; `28.6 s` full 60,649-gene GRCh38 GENCODE v38 vs. `753.8 s` original):**
+  * Eliminated $O(G^2)$ splice-graph sequence concatenation (`1.80 TiB → 12.8 GiB` allocations on GRCh38), $O(N \times M)$ GTF coordinate deduplication, and per-push k-mer edge re-sorting; parallelized per-chromosome `SpliceGraph` construction across threads while maintaining **100% `.jls` binary compatibility**.
 * **New Beta-Binomial GLM `whippet-delta.jl` with covariates & FDR:**
   * Replaces legacy 10,000-draw Monte Carlo Beta comparisons by default with a multithreaded **Beta-Binomial GLM** featuring constitutive/boundary event exclusion, **Spliced vs. Tandem UTR (`TS`/`TE`) stratified Cox–Reid Empirical Bayes dispersion shrinkage** (with Smyth finite-df $\log\chi^2$ median bias correction), **finite-sample $F$-test LRT p-values**, and **Benjamini–Hochberg FDR**.
   * Cuts realized FDR on full human `E-MTAB-3766` by **15×** (`81.5%` → **`5.3%`** all events; **`1.3%`** spliced events at nominal 0.05) while lifting AUPRC from `0.352` → **`0.551`**.
@@ -45,6 +45,22 @@ Benchmarked on the human `E-MTAB-3766` paired-end 101 bp dataset (Soneson et al.
 | **Differential Splicing (`@0.05`, Spliced Only)** | TPR 0.592 · **FDR 74.6%** *(45.9% at `\|ΔΨ\|≥0.1`)* · AUPRC 0.404 | TPR **0.309** · **FDR 1.3%** · AUPRC **0.549** | **57× lower FDR**, **+0.15 AUPRC** |
 
 *Note: Original `Whippet.jl` v1.6.2 requires Julia 1.6 (single-threaded, x86_64 under Rosetta 2 on Apple Silicon). Differential splicing accuracy compares gene-level Simes+BH FDR (Whippet2-turbo Stratified EB GLM) against `Probability >= 0.95` (original `--legacy` pooled Beta MC).*
+
+### Real Human RNA-seq vs. PacBio HiFi Long-Read Ground Truth (`LRGASP WTC11`, GRCh38)
+
+Benchmarked on real human WTC11 iPSC paired-end RNA-seq (ENCODE `ENCSR673UKZ` Rep 1: 45.78M pairs = 91.57M unstranded 100 bp reads, `--biascorrect`) against the full **GRCh38 primary assembly + GENCODE v38 basic annotation** (60,649 genes, 111,832 transcripts), with orthogonal long-read ground-truth PSI computed from pooled 3-replicate matched PacBio HiFi Iso-Seq FLNC alignments (ENCODE `ENCSR507JOF`: 6.79M alignments, `LR ≥ 20`, `SR ≥ 10`; PSI concordance reported as `r / ρ / MAE`):
+
+| Metric (`GRCh38` / `WTC11` Rep 1) | Original `Whippet.jl` v1.6.2 *(1T, Rosetta 2)* | **Whippet2-turbo** *(16T, native arm64)* | Improvement |
+|---|---:|---:|---|
+| **GRCh38 Index Build** *(60,649 genes, uncompressed FASTA)* | 753.8 s *(12m 34s)* · 9.94 GB RSS *(1.80 TiB alloc)* | **28.6 s** · **5.50 GB** RSS *(12.8 GiB alloc)* | **26.4× faster**, **1.81× less RAM** (`144×` less alloc) |
+| **WTC11 Rep 1 `quant`** *(91.6M reads, `--biascorrect`)* | 1,467.4 s *(24m 27s, 62.4k/s)* · 7.00 GB footprint | **82.3 s** *(1.11M/s)* · 9.10 GB footprint | **17.8× faster**, exact 100% read parity (`24.70M` pairs) |
+| **All Matched Canonical PSI** (`n = 117,719`) | 0.9738 / 0.6631 / 0.0185 | **0.9790 / 0.6825 / 0.0165** | **-11% MAE** |
+| **Polymorphic Canonical PSI** (`0.05 ≤ LR ≤ 0.95`, `n = 13,359`) | 0.9064 / 0.8473 / 0.1023 | **0.9316 / 0.8689 / 0.0821** | **+0.025 $r$**, **-20% MAE** |
+| **Polymorphic `AA` / `AD`** (`n = 1,699` / `1,390`) | `0.8440 / 0.1494` · `0.8567 / 0.1289` *(`r / MAE`)* | **`0.9247 / 0.0808`** · **`0.9154 / 0.0870`** | **-46% MAE (`AA`)**, **-33% MAE (`AD`)** |
+| **Polymorphic `CE` / `RI`** (`n = 8,704` / `815`) | `0.9121 / 0.0870` · `0.8760 / 0.1109` *(`r / MAE`)* | **`0.9217 / 0.0783`** · **`0.8996 / 0.0955`** | **-10% MAE (`CE`)**, **-14% MAE (`RI`)** |
+| **Polymorphic Complex ($K_n \ge 2$)** (`n = 7,294`) | 0.9018 / 0.8662 / 0.1017 | **0.9333 / 0.8974 / 0.0780** | **+0.032 $r$**, **-23% MAE** |
+
+*Both tools mapped the exact same `24,700,206` read pairs (`53.9%`); the substantial PSI accuracy improvements over Original `Whippet.jl` come from Whippet2-turbo's `--biascorrect` GC lookup fix and event-quantification fixes.*
 
 ### Microbenchmark vs. Upstream `whippet2-julia19-dev` (50k PE 100 bp reads, 58,806-gene index, `--biascorrect`, warm steady-state)
 
