@@ -68,16 +68,16 @@ Benchmarked on real human WTC11 iPSC paired-end RNA-seq (ENCODE `ENCSR673UKZ` Re
 
 Benchmarked on **14 real human CEU LCL donors** from Geuvadis (Lappalainen et al., *Nature* 2013; `UNIGE` `6F + 2M`, `ICMB` `2F + 4M`; `353.4M` PE pairs = `706.9M` 75 bp reads, GRCh38 GENCODE v38, `-t 16`, `--biascorrect`) across all $\binom{6}{3}/2 = 10$ exact 3v3 same-condition null splits (`6F UNIGE`, `-r 5 -s 2`) and imbalanced multivariable batch adjustment (`~ center + sex`):
 
-| Metric (`Geuvadis` 14-Donor Cohort, GRCh38) | Original / Legacy `Whippet.jl` | **Whippet2-turbo** *(16T, Stratified EB GLM)* | Improvement |
+| Metric (`Geuvadis` 14-Donor Cohort, GRCh38) | Original `Whippet.jl` v1.6.2 *(1T, `+`-stripped)*¹ | **Whippet2-turbo** *(16T, Stratified EB GLM)* | Improvement |
 |---|---:|---:|---|
-| **14-Sample `quant --batch`** *(706.9M reads)* | *SRA parser error*¹ | **429.2 s** *(7m 09s, 1.65M/s)* · 9.88 GB flat | Native raw SRA FASTQ support (`73.7%` mapped) |
-| **10 Null Splits — `delta` Runtime** *(mean)* | 61.28 s *(`--legacy` Beta MC)* | **20.77 s** | **2.95× faster** |
-| **10 Null Splits — Mean / Med FPs** (`@0.05`) | **7,250.2 / 7,145.0** *(4,080 @ `\|ΔΨ\| ≥ 0.1`)* | **0.8 / 0.0** *(0.3 / 0.0 Spliced; 9/10 splits = 0 FPs)* | **>5,100×–9,060× fewer FPs** |
-| **10 Null Splits — FPR `@p≤0.05`** (All / Spliced) | 4.44% / 3.31% *(call rate)* | **1.44% / 0.83%** | Well-calibrated real-replicate null |
-| **14-Sample `delta` (`~ center + sex`)** | 86.94 s² *(unadj. only)* | **46.51 s** *(30.93 s unadj.)* · 2.86 GB | **1.87× faster**, multivariable covariates |
-| **Batch Adjustment (`~ center + sex`)** | **3,276** calls *(1,593 @ `\|ΔΨ\| ≥ 0.1`; 1.04× null `chrX/Y` enrich.)* | **-13.9%** spliced $\hat\phi$ · **0** center leaks (`FDR ≤ 0.05`) · **`17 → 27`** `chrX/Y` hits (`1.70×` enrich.) | Removes batch variance & recovers `chrX/Y` signal |
+| **14-Sample `quant`** *(706.9M reads)* | 11,145.4 s *(3h 06m serial, `63.4k/s`)* · 6.30 GB | **429.2 s** *(7m 09s, `1.65M/s`, `--batch`)* · 9.88 GB flat | **26.0× faster**, native raw SRA FASTQs (`73.66%` exact parity) |
+| **10 Null Splits — `delta` Runtime** *(mean)* | 57.74 s *(native Beta MC)* | **20.77 s** | **2.78× faster** |
+| **10 Null Splits — Mean / Med FPs** (`@0.05`) | **1,508.9 / 1,402.0** *(1,202.9 @ `\|ΔΨ\| ≥ 0.1`; `120.1` Spliced)* | **0.8 / 0.0** *(0.3 / 0.0 Spliced; 9/10 splits = 0 FPs)* | **1,886× fewer FPs** (`1,504×` @ `\|ΔΨ\| ≥ 0.1`; `400×` Spliced) |
+| **10 Null Splits — FPR `@p≤0.05`** (All / Spliced) | 1.11% / 0.12% *(call rate)* | **1.44% / 0.83%** | Well-calibrated real-replicate null |
+| **14-Sample `delta` (`~ center + sex`)** | 104.85 s · 1.23 GB *(unadj. only)* | **46.51 s** *(30.93 s unadj.)* · 2.86 GB | **2.25× faster**, multivariable covariates |
+| **Batch Adjustment (`~ center + sex`)** | **90** unadj. calls *(87 `TS`/`TE`, `0.68×` depleted `chrX/Y`, `0` spliced `chrX/Y`)* | **-13.9%** spliced $\hat\phi$ · **0** center leaks (`FDR ≤ 0.05`) · **`17 → 27`** `chrX/Y` hits (`1.70×` enrich.) | Removes batch variance & recovers `chrX/Y` signal |
 
-*¹ Original `Whippet.jl` v1.6.2 fails on raw SRA FASTQ files with `Cannot encode 78` ([upstream #135](https://github.com/timbitz/Whippet.jl/issues/135), avoidable in v1.6.2 by preprocessing FASTQs to strip `+ERR...` line-3 headers to bare `+`); legacy Beta MC (`whippet-delta.jl --legacy`) was therefore run on `Whippet2-turbo`'s identically aligned `.psi.gz` outputs. ² On the 14-sample `6M vs 8F` comparison, `--legacy` Beta MC threw a Beta `DomainError` on discordant biological donor outliers at default `--max-variance` and required `--max-variance 0.05`.*
+*¹ Original `Whippet.jl` v1.6.2 fails on raw SRA FASTQ files with `Cannot encode 78` ([upstream #135](https://github.com/timbitz/Whippet.jl/issues/135)); stripping line-3 `+ERR...` headers to bare `+` (without modifying sequences or qualities) enabled a complete native 14-sample v1.6.2 run (`11,145.4 s` serial sum, exact `260,345,641 / 353,445,768` mapped-pair parity with `Whippet2-turbo`), whereas `Whippet2-turbo` parses raw SRA FASTQs natively.*
 
 ### Microbenchmark vs. Upstream `whippet2-julia19-dev` (50k PE 100 bp reads, 58,806-gene index, `--biascorrect`, warm steady-state)
 
