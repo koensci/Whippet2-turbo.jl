@@ -3,6 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 > **Fork Notice:** **Whippet2-turbo** (`whippet2` branch, `v2.0.0-fork.3`) is a performance-optimized, bug-fixed, and statistically upgraded fork of the `whippet2-julia19-dev` branch of [timbitz/Whippet.jl](https://github.com/timbitz/Whippet.jl). The performance optimizations, bug fixes, and Beta-Binomial GLM differential splicing engine in this fork were developed using Gemini 4 Neon. All original Whippet splice-graph algorithms, architecture, and MIT licensing remain the work of Tim Sterne-Weiler ([Sterne-Weiler et al., *Molecular Cell* 2018](https://doi.org/10.1016/j.molcel.2018.08.018)).
+>
+> **Looking for a standalone Rust successor?** See **[Langur](https://github.com/koensci/langur)** — a ground-up Rust re-architecture of the CSG workflow (`~1.4 GB` flat RAM, `< 1 ms` `mmap` index, selective genomic decoys, gapped indel alignment, CC-VBEM near-`Salmon` TPMs, and Gibbs `Inf_Var` for complex $K_n \ge 2$ events). Use **Whippet2-turbo** if you need 100% drop-in compatibility with existing Julia 1.9 `.jls` index files, or **Langur** for new cohorts.
 
 ![Whippet Schematic](https://timbitz.github.io/images/Whippet-Fig1.gif)
 
