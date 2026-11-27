@@ -127,11 +127,27 @@ end
 function twobit_enc(seq)
    len = length(seq)
    ret = IntVector{2,UInt8}(len)
-   for i in 1:len
-      val = isambiguous(seq[i]) ? 0x00 : convert(UInt8, trailing_zeros(seq[i]))
+   @inbounds for i in 1:len
+      b = seq[i]
+      val = isambiguous(b) ? 0x00 : convert(UInt8, trailing_zeros(b))
       ret[i] = val
    end
    ret
+end
+
+function twobit_enc_graphs( graphs::Vector{SpliceGraph}, total_len::Int )
+   ret = IntVector{2,UInt8}(total_len)
+   pos = 1
+   @inbounds for g in graphs
+      seq = g.seq::LongSequence{DNAAlphabet{4}}
+      len = length(seq)
+      for i in 1:len
+         b = seq[i]
+         ret[pos] = isambiguous(b) ? 0x00 : convert(UInt8, trailing_zeros(b))
+         pos += 1
+      end
+   end
+   return ret
 end
 
 
@@ -160,44 +176,55 @@ end
 
 function trans_index!( fhIter, ref::RefSet; kmer=9, version=v"1.7" )
    seqdic  = build_chrom_dict( ref )
-   xcript  = dna""
-   xoffset = Vector{UInt64}()
-   xgenes  = Vector{GeneName}()
-   xinfo   = Vector{GeneInfo}()
-   xlength = Vector{Float64}()
-   xgraph  = Vector{SpliceGraph}()
-   # set up splice graphs
+   ng_est  = length(ref)
+   xoffset = sizehint!(Vector{CoordInt}(), ng_est)
+   xgenes  = sizehint!(Vector{GeneName}(), ng_est)
+   xinfo   = sizehint!(Vector{GeneInfo}(), ng_est)
+   xlength = sizehint!(Vector{Float64}(), ng_est)
+   xgraph  = sizehint!(Vector{SpliceGraph}(), ng_est)
+   # set up splice graphs (parallel per chromosome, deterministic order, zero O(N^2) xcript concat)
    runoffset = 0
    num = 0
    for r in fhIter
       name = String(r.data[r.identifier])
       haskey(seqdic, name) || continue
-      #BioSequences.immutable!(r.seq)
-      sg = SGSequence( r.data[r.sequence] )
+      sg = LongSequence{DNAAlphabet{4}}( r.data[r.sequence] )
 
+      genes = seqdic[name]
+      ng = length(genes)
       println(stderr, "Building Splice Graphs for $( name ).." )
-      @timer for g in seqdic[name]
-         #println( stderr, "Building $g Splice Graph..." )
-         curgraph = SpliceGraph( ref[g], sg, kmer )
-         xcript  *= curgraph.seq
-         push!(xgraph, curgraph)
-         push!(xgenes, g)
-         push!(xinfo, ref[g].info )
-         push!(xlength, ref[g].length )
-         push!(xoffset, runoffset)
-         runoffset += length(curgraph.seq)
-         num += 1
+      @timer begin
+         chr_graphs = Vector{SpliceGraph}(undef, ng)
+         if Threads.nthreads() > 1 && ng > 1
+            Threads.@threads for gi in 1:ng
+               @inbounds chr_graphs[gi] = SpliceGraph( ref[genes[gi]], sg, kmer )
+            end
+         else
+            @inbounds for gi in 1:ng
+               chr_graphs[gi] = SpliceGraph( ref[genes[gi]], sg, kmer )
+            end
+         end
+         @inbounds for gi in 1:ng
+            g = genes[gi]
+            curgraph = chr_graphs[gi]
+            rg = ref[g]
+            push!(xgraph, curgraph)
+            push!(xgenes, g)
+            push!(xinfo, rg.info)
+            push!(xlength, rg.length)
+            push!(xoffset, CoordInt(runoffset))
+            runoffset += length(curgraph.seq)
+            num += 1
+         end
       end
    end
    if num > 1
       println( stderr, "Building full sg-index from $num genes..." )
-      @time fm = FMIndex(twobit_enc(xcript), 4, r=1, program=:SuffixArrays, mmap=true)
+      @time fm = FMIndex(twobit_enc_graphs(xgraph, runoffset), 4, r=1, program=:SuffixArrays, mmap=true)
    else
       error("ERROR: No genes in the GTF file matched chromosome names in the FASTA file!")
    end
 
-   # clean up
-   xcript = SGSequence()
    GC.gc()
 
    println( stderr, "Building edges.." )
@@ -210,10 +237,10 @@ end
 function fasta_to_index( filename::String, ref::RefSet; kmer=9 )
    if isgzipped( filename )
       println(stderr, "Decompressing and Indexing $filename...")
-      to_open = open( filename ) |> x->ZlibInflateInputStream(x, reset_on_end=true)
+      to_open = open( filename ) |> x->ZlibInflateInputStream(x, reset_on_end=true, bufsize=262144)
    else
       println(stderr, "Indexing $filename...")
-      to_open = open( filename ) |> BufferedInputStream
+      to_open = open( filename ) |> x->BufferedInputStream(x, 262144)
    end
    # iterate through fasta entries
    index = @time trans_index!(FASTA.Reader( to_open ), ref, kmer=kmer)

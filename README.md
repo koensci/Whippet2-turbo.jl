@@ -33,7 +33,7 @@ Benchmarked on the human `E-MTAB-3766` paired-end 101 bp dataset (Soneson et al.
 
 | Metric (`E-MTAB-3766`, `--biascorrect`) | Original `Whippet.jl` v1.6.2 *(Julia 1.6, 1T, Rosetta 2)* | **Whippet2-turbo** *(Julia 1.9, 16T, native arm64)* | Improvement |
 |---|---:|---:|---|
-| **Index Build** (20,410 genes, 145k tx) | 340.8 s · 8.58 GB RSS | **233.0 s** · 8.74 GB RSS | **1.46× faster** |
+| **Index Build** (20,410 genes, 145k tx) | 340.8 s · 8.58 GB RSS | **28.5 s** · **4.88 GB** RSS | **12.0× faster**, **1.76× less RAM** |
 | **Sample 1 `quant`** (80M reads) | 1,608.4 s *(26m 48s, 49.7k reads/s)* | **81.1 s** *(987k reads/s)* · 9.62 GB footprint | **19.8× faster** |
 | **6-Sample Cohort** (480M reads) | *9,650.6 s* *(2h 41m, 6× extrap.)* | **433.8 s** *(7m 14s, 1.11M reads/s, `--batch`)* · 9.83 GB flat | **22.2× faster** |
 | **Gene TPM MARD** (vs. exact RSEM truth, TPM ≥ 1) | 0.0753 *(Spearman ρ = 0.9797)* | **0.0443** *(Spearman ρ = 0.9810)* | **1.70× lower error** *(GC bias fix)* |

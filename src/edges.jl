@@ -116,10 +116,19 @@ function add_kmer_edge!( kmers::Vector{SGNodeSet},
    end
    if ind > 0
       if !isassigned(kmers, ind)
-         kmers[ind] = SGNodeSet()
+         kmers[ind] = SGNode[entry]
+      else
+         v = kmers[ind]
+         last_el = @inbounds v[end]
+         if sortlt(last_el, entry)
+            push!(v, entry)
+         elseif last_el.gene != entry.gene || last_el.node != entry.node
+            # Rare out-of-order insertion fallback
+            push!(v, entry)
+            sort!(v, lt=sortlt)
+            unique!(v)
+         end
       end
-      push!(kmers[ind], entry)
-      kmers[ind] = sort( kmers[ind], lt=sortlt ) |> unique
    end
    UInt64(max(0, ind-1))
 end

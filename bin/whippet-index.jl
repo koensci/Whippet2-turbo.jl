@@ -15,6 +15,7 @@ using Whippet
 using BioAlignments
 using XAM
 using Libz
+using BufferedStreams
 using Serialization
 using Nullables
 using ArgParse
@@ -76,7 +77,9 @@ function main()
    println(stderr, "Loading $annotxt file: $flat")
    fh = open( flat , "r")
    if isgzipped( flat )
-      fh = fh |> x->ZlibInflateInputStream(x, reset_on_end=true)
+      fh = fh |> x->ZlibInflateInputStream(x, reset_on_end=true, bufsize=262144)
+   else
+      fh = BufferedInputStream(fh, 262144)
    end
 
    if args["bam"] != nothing

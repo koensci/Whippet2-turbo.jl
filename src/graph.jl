@@ -88,17 +88,34 @@ end
 
 const ExpectedGC = Vector{Float16}
 
+@inline _is_gc_dna( b::DNA ) = (b == DNA_G) | (b == DNA_C) | (b == DNA_S)
+
 function ExpectedGC( seq::BioSequence{A}; gc_param = GCBiasParams(50, 0.05) ) where A <: BioSequences.Alphabet
-   bins = zeros(Float16, Int(div(1.0, gc_param.width)+1))
-   for i in 1:length(seq)-gc_param.length+1
-      gc = Int(div(gc_content(seq[i:i+gc_param.length-1]), gc_param.width)+1)
-      @inbounds bins[gc] += 1.0
+   nbins = Int(div(1.0, gc_param.width) + 1)
+   bins = zeros(Float16, nbins)
+   wlen = Int(gc_param.length)
+   slen = length(seq)
+   slen < wlen && return bins
+
+   counts = zeros(Int, nbins)
+   inv_wlen = 1.0 / Float64(wlen)
+   width = gc_param.width
+
+   gc_cnt = 0
+   @inbounds for i in 1:wlen
+      gc_cnt += ifelse(_is_gc_dna(seq[i]), 1, 0)
    end
-   # normalize columns
-   binsum = sum(bins)
-   binsum == 0.0 && (return bins)
-   for i in 1:length(bins)
-      @fastmath bins[i] /= binsum
+   @inbounds counts[Int(div(gc_cnt * inv_wlen, width)) + 1] += 1
+
+   @inbounds for i in (wlen + 1):slen
+      gc_cnt += ifelse(_is_gc_dna(seq[i]), 1, 0) - ifelse(_is_gc_dna(seq[i - wlen]), 1, 0)
+      counts[Int(div(gc_cnt * inv_wlen, width)) + 1] += 1
+   end
+
+   total = slen - wlen + 1
+   inv_tot = 1.0 / Float64(total)
+   @inbounds for i in 1:nbins
+      bins[i] = Float16(counts[i] * inv_tot)
    end
    return bins
 end
@@ -136,40 +153,48 @@ function SpliceGraph( gene::RefGene, genome::SGSequence, k::Int )
    nodecoord  = Vector{CoordInt}()
    nodelen    = Vector{CoordInt}()
    edgetype   = Vector{EdgeType}()
-   seq        = LongSequence{DNAAlphabet{4}}()
 
    strand = gene.info.strand  # Bool
 
    # initialize iterators
-   a,alen = 1,length(gene.acc)
-   d,dlen = 1,length(gene.don)
-   s,slen = 1,length(gene.txst)
-   p,plen = 1,length(gene.txen)
+   alen = length(gene.acc)
+   dlen = length(gene.don)
+   slen = length(gene.txst)
+   plen = length(gene.txen)
 
-   idx = [a, d, s, p]
+   i1 = 1; i2 = 1; i3 = 1; i4 = 1
 
    # return a tuple containing the min coordinate's idx,val
-   # each of 4 categories, txstart, donor, acceptor, txend
-   function getmin_ind_val( gene::RefGene, idx; def=typemax(CoordInt) )
-      retarr = CoordInt[ get(gene.txen, idx[1], def),
-                         get(gene.acc,  idx[2], def),
-                         get(gene.don,  idx[3], def),
-                         get(gene.txst, idx[4], def) ]
-      argmin( retarr ), min( retarr... )
+   # each of 4 categories: 1=txen, 2=acc, 3=don, 4=txst
+   @inline function getmin_ind_val( i1::Int, i2::Int, i3::Int, i4::Int )
+      def = typemax(CoordInt)
+      v1 = i1 <= plen ? (@inbounds gene.txen[i1]) : def
+      v2 = i2 <= alen ? (@inbounds gene.acc[i2])  : def
+      v3 = i3 <= dlen ? (@inbounds gene.don[i3])  : def
+      v4 = i4 <= slen ? (@inbounds gene.txst[i4]) : def
+      best_i = 1
+      best_v = v1
+      if v2 < best_v; best_i = 2; best_v = v2; end
+      if v3 < best_v; best_i = 3; best_v = v3; end
+      if v4 < best_v; best_i = 4; best_v = v4; end
+      return best_i, best_v
    end
 
-   while( idx[1] <= alen || idx[2] <= dlen || idx[3] <= slen || idx[4] <= plen )
-      # iterate through donors, and acceptors
-      # left to right. '-' strand gets revcomp and unshift
-      minidx,minval = getmin_ind_val( gene, idx )
-      idx[minidx] += 1
-      secidx,secval = getmin_ind_val( gene, idx )
+   while (i1 <= plen || i2 <= alen || i3 <= dlen || i4 <= slen)
+      # iterate through donors, acceptors, txst, txen left to right;
+      # '-' strand is reversed in O(N) after the loop.
+      minidx, minval = getmin_ind_val(i1, i2, i3, i4)
+      if minidx == 1; i1 += 1
+      elseif minidx == 2; i2 += 1
+      elseif minidx == 3; i3 += 1
+      else; i4 += 1
+      end
+      secidx, secval = getmin_ind_val(i1, i2, i3, i4)
 
       # last coordinate in the gene:
-      # if secidx == 1 && get(gene.txst, idx[secidx], Inf) == Inf
       if secval == typemax(CoordInt)
          termedge = strand ? EdgeType(0x03) : EdgeType(0x00)
-         stranded_push!(edgetype, termedge, strand)
+         push!(edgetype, termedge)
          break
       end
 
@@ -180,36 +205,62 @@ function SpliceGraph( gene::RefGene, genome::SGSequence, k::Int )
          leftadj  = (minidx == 1 || minidx == 3) && minval != secval ? 1 : 0
          rightadj = (secidx == 2 || secidx == 4) && minval != secval ? 1 : 0
          nodesize = Int(secval - minval) - leftadj - rightadj + 1
-         nodeseq  = copy(genome[(Int(minval)+leftadj):(Int(secval)-rightadj)]) # collect slice
          edge     = get_edgetype( minidx, secidx, true, strand ) # determine EdgeType
          pushval  = minval + leftadj
-         thridx = 0
       else # don't make a node, this is a sequence gap, make edge and inc+=2
-         idx[secidx] += 1 #skip ahead again
-         thridx,thrval = getmin_ind_val( gene, idx )
+         if secidx == 1; i1 += 1
+         elseif secidx == 2; i2 += 1
+         elseif secidx == 3; i3 += 1
+         else; i4 += 1
+         end
+         thridx, thrval = getmin_ind_val(i1, i2, i3, i4)
          rightadj = (thridx == 2 || thridx == 4) && secval != thrval ? 1 : 0
          nodesize = Int(thrval - secval) - rightadj + 1
-         nodeseq  = copy(genome[Int(secval):(Int(thrval)-rightadj)])
          edge     = get_edgetype( minidx, secidx, false, strand )
          pushval  = secval
       end
 
-      if strand
-         seq *= nodeseq
-      else # '-' strand
-         seq = reverse_complement(nodeseq) * seq
-      end
-      stranded_push!(nodecoord, pushval,  strand)
-      stranded_push!(nodelen,   nodesize, strand)
-      stranded_push!(edgetype,  edge,     strand)
+      push!(nodecoord, CoordInt(pushval))
+      push!(nodelen,   CoordInt(max(0, nodesize)))
+      push!(edgetype,  edge)
 
    end # end while
 
-   # calculate node offsets-->
-   curoffset = 1
-   for n in nodelen
+   if !strand
+      reverse!(nodecoord)
+      reverse!(nodelen)
+      reverse!(edgetype)
+   end
+
+   # calculate node offsets and pre-allocate full gene sequence in O(N)
+   nnodes = length(nodelen)
+   sizehint!(nodeoffset, nnodes)
+   curoffset = CoordInt(1)
+   totlen = 0
+   @inbounds for i in 1:nnodes
       push!(nodeoffset, curoffset)
-      curoffset += n
+      nl = Int(nodelen[i])
+      curoffset += CoordInt(nl)
+      totlen += nl
+   end
+
+   seq = LongSequence{DNAAlphabet{4}}(totlen)
+   if strand
+      @inbounds for i in 1:nnodes
+         nl = Int(nodelen[i])
+         nl > 0 || continue
+         copyto!(seq, Int(nodeoffset[i]), genome, Int(nodecoord[i]), nl)
+      end
+   else
+      @inbounds for i in 1:nnodes
+         nl = Int(nodelen[i])
+         nl > 0 || continue
+         dst_off = Int(nodeoffset[i])
+         src_end = Int(nodecoord[i]) + nl - 1
+         for p in 0:(nl - 1)
+            seq[dst_off + p] = BioSequences.complement(genome[src_end - p])
+         end
+      end
    end
 
    eleft  = Vector{SGKmer{k}}(undef, length(edgetype))
@@ -217,9 +268,9 @@ function SpliceGraph( gene::RefGene, genome::SGSequence, k::Int )
 
    paths = build_paths_edges( nodecoord, nodelen, gene )
    names = map( x->x.info.name, gene.reftx )
-   expgc = map( x->ExpectedGC(path_to_seq(x, nodeoffset, nodelen, seq)), paths )
+   expgc = ExpectedGC[ExpectedGC(path_to_seq(p, nodeoffset, nodelen, seq)) for p in paths]
 
-   return SpliceGraph( nodeoffset, nodecoord, nodelen, edgetype, eleft, eright, paths, names, expgc, seq )
+   return SpliceGraph{k}( nodeoffset, nodecoord, nodelen, edgetype, eleft, eright, paths, names, expgc, seq )
 end
 
 # re-orient - strand by using pushfirst! instead of push!
@@ -258,16 +309,17 @@ function build_annotated_path( nodecoord::Vector{CoordInt},
                                tx::RefTx, 
                                strand::Bool )
    path = BitSet()
-   # this may be `poor form`, but 256 is too big for default!
-   # resize!(path.bits, 64) # Deprecated:  = zeros(UInt32,64>>>5)
-   for i in 1:length(tx.acc)
-      ind = collect(searchsorted( nodecoord, tx.acc[i], rev=!strand ))[end]
+   nnodes = length(nodecoord)
+   step = strand ? 1 : -1
+   @inbounds for i in 1:length(tx.acc)
+      rng = searchsorted( nodecoord, tx.acc[i], rev=!strand )
+      ind = last(rng)
       push!( path, ind )
-      cur = ind + (strand ? 1 : -1)
-      while 1 <= cur <= length(nodecoord) &&
-            nodecoord[cur] <= tx.don[i]
+      cur = ind + step
+      don_i = tx.don[i]
+      while 1 <= cur <= nnodes && nodecoord[cur] <= don_i
          push!( path, cur )
-         cur = cur + (strand ? 1 : -1 )
+         cur += step
       end
    end
    path
@@ -276,10 +328,9 @@ end
 function build_paths_edges( nodecoord::Vector{CoordInt},
                             nodelen::Vector{CoordInt},
                             gene::RefGene )
-   paths = Vector{BitSet}()
-   for tx in gene.reftx
-      curpath = build_annotated_path( nodecoord, nodelen, tx, gene.info.strand )
-      push!( paths, curpath )
+   paths = Vector{BitSet}(undef, length(gene.reftx))
+   @inbounds for (i, tx) in enumerate(gene.reftx)
+      paths[i] = build_annotated_path( nodecoord, nodelen, tx, gene.info.strand )
    end
    paths
 end
@@ -288,5 +339,18 @@ function path_to_seq( path::BitSet,
                       nodeoffset::Vector{CoordInt},
                       nodelen::Vector{CoordInt}, 
                       seq::SGSequence )
-   SGSequence(join( map( x->seq[nodeoffset[x]:(nodeoffset[x]+nodelen[x]-1)], collect(path) ) ))
+   totlen = 0
+   @inbounds for x in path
+      totlen += Int(nodelen[x])
+   end
+   out = LongSequence{DNAAlphabet{4}}(totlen)
+   pos = 1
+   @inbounds for x in path
+      nl = Int(nodelen[x])
+      if nl > 0
+         copyto!(out, pos, seq, Int(nodeoffset[x]), nl)
+         pos += nl
+      end
+   end
+   return out
 end

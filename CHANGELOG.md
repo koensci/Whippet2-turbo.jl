@@ -4,6 +4,13 @@
 
 Upgraded `whippet-delta.jl` with a multithreaded Beta-Binomial GLM differential splicing engine supporting covariates, Empirical Bayes dispersion shrinkage, and Benjamini–Hochberg FDR (developed using Gemini 4 Neon). Requires zero new Julia dependencies and maintains full `.jls` index and `.psi.gz` compatibility with `v2.0.0-fork.1` and `v2.0.0-fork.2`.
 
+### Index Building Improvements (`whippet-index`)
+* **8.2× faster human index building (`233.0 s → 28.5 s`, `12.0×` faster than original `Whippet.jl`, `8.74 GB → 4.88 GB` RSS; `src/index.jl`, `src/graph.jl`, `src/refset.jl`, `src/edges.jl`, `bin/whippet-index.jl`):**
+  * Eliminated $O(G^2)$ `xcript *= curgraph.seq` concatenation (~450 GiB of temporary copies on human) by encoding `IntVector{2,UInt8}` directly from `xgraph` (`twobit_enc_graphs`) and parallelizing per-chromosome `SpliceGraph` construction with `Threads.@threads`.
+  * Replaced $O(N^2)$ per-gene `seq *= nodeseq` / `reverse_complement(nodeseq) * seq`, `path_to_seq` string round-trips, and per-base slicing in `ExpectedGC` with pre-allocated single-pass `LongSequence` construction and a zero-allocation $O(L)$ sliding-window GC counter.
+  * Replaced $O(N \times M)$ `unique_tuple` Cartesian loops and tuple-length JIT specialization in `load_gtf` with per-gene `Vector{CoordInt}` accumulation (`sort!`/`unique!` once per gene) and a zero-allocation GTF tab/attribute scanner.
+  * Replaced per-push `sort |> unique` in `add_kmer_edge!` with $O(1)$ monotonic append-dedup. Maintains **100% `.jls` binary compatibility**.
+
 ### Batch Cohort Quantification (`whippet-quant`)
 * **Single-load `--batch <manifest.csv|tsv>` mode & memory reclamation (`bin/whippet-quant.jl`, `src/bias.jl`):** Quantifies an entire cohort in one Julia session (loading and deserializing the `.jls` index once), supporting both 3-column (`sample,r1,out_prefix`) and 4-column (`sample,r1,r2,out_prefix`) manifests. Added lazy empty sentinels and eager buffer release in `JointBiasCounter` (`primer_adjust!`/`gc_adjust!`), early clearing of `sgq.long`/`multi.map`/`quant.classes`, and inter-sample `GC.gc(true)` + OS malloc trim (`malloc_zone_pressure_relief` on macOS / `malloc_trim` on Linux) to keep peak memory flat across batch samples.
 
