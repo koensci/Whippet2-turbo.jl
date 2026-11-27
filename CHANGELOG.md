@@ -5,7 +5,7 @@
 Upgraded `whippet-delta.jl` with a multithreaded Beta-Binomial GLM differential splicing engine supporting covariates, Empirical Bayes dispersion shrinkage, and Benjamini–Hochberg FDR (developed using Gemini 4 Neon). Requires zero new Julia dependencies and maintains full `.jls` index and `.psi.gz` compatibility with `v2.0.0-fork.1` and `v2.0.0-fork.2`.
 
 ### Index Building Improvements (`whippet-index`)
-* **8.2× faster human index building (`233.0 s → 28.5 s`, `12.0×` faster than original `Whippet.jl`, `8.74 GB → 4.88 GB` RSS; `src/index.jl`, `src/graph.jl`, `src/refset.jl`, `src/edges.jl`, `bin/whippet-index.jl`):**
+* **8.4× faster human index building (`233.0 s → 27.6 s`, `12.3×` faster than original `Whippet.jl`, `8.74 GB → 4.90 GB` RSS; `src/index.jl`, `src/graph.jl`, `src/refset.jl`, `src/edges.jl`, `bin/whippet-index.jl`):**
   * Eliminated $O(G^2)$ `xcript *= curgraph.seq` concatenation (~450 GiB of temporary copies on human) by encoding `IntVector{2,UInt8}` directly from `xgraph` (`twobit_enc_graphs`) and parallelizing per-chromosome `SpliceGraph` construction with `Threads.@threads`.
   * Replaced $O(N^2)$ per-gene `seq *= nodeseq` / `reverse_complement(nodeseq) * seq`, `path_to_seq` string round-trips, and per-base slicing in `ExpectedGC` with pre-allocated single-pass `LongSequence` construction and a zero-allocation $O(L)$ sliding-window GC counter.
   * Replaced $O(N \times M)$ `unique_tuple` Cartesian loops and tuple-length JIT specialization in `load_gtf` with per-gene `Vector{CoordInt}` accumulation (`sort!`/`unique!` once per gene) and a zero-allocation GTF tab/attribute scanner.
