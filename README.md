@@ -16,6 +16,8 @@
   * Single-load `--batch <manifest.csv|tsv>` cohort mode with lazy/eager bias buffer reclamation and OS malloc trim (`malloc_zone_pressure_relief` / `malloc_trim`), keeping peak memory flat across all samples (~9.8 GB on full human 480M-read cohorts).
   * Automatic `igzip` / `pigz` FASTQ decompression via POSIX `popen` (avoiding libuv lock contention; automatically falls back to `Libz`).
   * Exact FM-index seed re-check skipping, zero-allocation FASTQ/seed/k-mer/bias/output hot paths, and parallel `process_events` with concurrent RFC 1952 gzip compression.
+* **12.3× faster full-human `whippet-index.jl` (`27.6 s`, `4.90 GB` RSS — `8.4×` faster than prior Julia 1.9):**
+  * Eliminated $O(G^2)$ splice-graph sequence concatenation (~450 GiB of temporary copies), $O(N \times M)$ GTF coordinate deduplication, and per-push k-mer edge re-sorting; parallelized per-chromosome `SpliceGraph` construction across threads while maintaining **100% `.jls` binary compatibility**.
 * **New Beta-Binomial GLM `whippet-delta.jl` with covariates & FDR:**
   * Replaces legacy 10,000-draw Monte Carlo Beta comparisons by default with a multithreaded **Beta-Binomial GLM** featuring constitutive/boundary event exclusion, **Spliced vs. Tandem UTR (`TS`/`TE`) stratified Cox–Reid Empirical Bayes dispersion shrinkage** (with Smyth finite-df $\log\chi^2$ median bias correction), **finite-sample $F$-test LRT p-values**, and **Benjamini–Hochberg FDR**.
   * Cuts realized FDR on full human `E-MTAB-3766` by **15×** (`81.5%` → **`5.3%`** all events; **`1.3%`** spliced events at nominal 0.05) while lifting AUPRC from `0.352` → **`0.551`**.
